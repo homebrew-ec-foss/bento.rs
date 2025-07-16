@@ -1,5 +1,6 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueHint};
 use log::info;
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -15,8 +16,8 @@ pub enum Commands {
     Create {
         #[arg(required = true)]
         container_id: String,
-        #[arg(short, long, required = true)]
-        bundle: String,
+        #[arg(short, long, required = true, value_hint = ValueHint::FilePath)]
+        bundle: PathBuf,
     },
     Start {},
     State {},
@@ -40,7 +41,8 @@ fn main() {
         } => {
             println!(
                 "Creating container '{}' with bundle '{}'",
-                container_id, bundle
+                container_id,
+                bundle.display()
             );
         }
         Commands::Start {} => {
