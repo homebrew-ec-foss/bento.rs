@@ -80,7 +80,6 @@ pub struct IDMap {
 }
 
 impl Config {
-    /// Read, parse and validate a bundle's `config.json`.
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
         let file = File::open(path)?;
         let reader = BufReader::new(file);
@@ -89,9 +88,8 @@ impl Config {
         Ok(cfg)
     }
 
-    /// Bento‑specific semantic checks.
     fn validate(&self) -> Result<(), ConfigError> {
-        // 1. spec version
+        // Check version
         if !self.oci_version.starts_with("1.") {
             return Err(ConfigError::Invalid(format!(
                 "unsupported ociVersion {0}",
@@ -99,7 +97,7 @@ impl Config {
             )));
         }
 
-        // 2. rootfs path must exist
+        // Check if rootfs exists
         if !self.root.path.is_dir() {
             return Err(ConfigError::Invalid(format!(
                 "root.path {:?} is not a directory",
@@ -107,16 +105,8 @@ impl Config {
             )));
         }
 
-        // 3. rootless: must contain uid/gid mappings
-        let rootless = !Uid::effective().is_root();
-        println!("DEBUG: rootless = {}", rootless);
-	if let Some(linux) = &self.linux {
-	    println!("DEBUG: uid_mappings = {:?}", linux.uid_mappings);
-	    println!("DEBUG: gid_mappings = {:?}", linux.gid_mappings);
-	} else {
-	    println!("DEBUG: linux section is missing");
-	}
-	
+        // check if rootless and had gid uid mappings
+        let rootless = !Uid::effective().is_root();	
         if rootless {
             let linux = self.linux.as_ref().ok_or_else(|| {
                 ConfigError::Invalid("linux section required for rootless".into())
