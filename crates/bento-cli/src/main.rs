@@ -1,6 +1,8 @@
 use clap::{Parser, Subcommand, ValueHint};
 use log::info;
 use std::path::PathBuf;
+use libbento::process::{test_fork_clone};
+
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -44,6 +46,12 @@ fn main() {
                 container_id,
                 bundle.display()
             );
+		//let config = Config::default();
+
+            	// Call your fork/clone workflow
+            	if let Err(e) = test_fork_clone() {
+                	eprintln!("Container creation failed: {e}");
+            }
         }
         Commands::Start {} => {
             println!("Start");
