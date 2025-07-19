@@ -1,0 +1,2 @@
+[alias]
+testrun = "run -p bento-cli -- create demo --bundle examples/busybox"
