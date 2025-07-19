@@ -1,13 +1,16 @@
-use nix::sched::{clone, CloneFlags};
-use nix::unistd::{fork, ForkResult, getpid, execvp, sethostname};
-use nix::sys::wait::waitpid;
-use std::ffi::CString;
-use libc;
+use nix::sched::CloneFlags;
+use nix::unistd::getpid;
+use nix::Error;  // For Result error type
+
+use crate::syscalls_fork::fork_intermediate;
+use crate::syscalls_unshare::unshare_namespaces;
+use crate::syscalls_clone::clone_init;
 
 pub struct Config {
     pub root_path: &'static str,
     pub args: Vec<&'static str>,
     pub hostname: &'static str,
+    pub rootless: bool,  // Toggle for rootless mode
 }
 
 impl Default for Config {
@@ -16,45 +19,35 @@ impl Default for Config {
             root_path: "/tmp/bento-rootfs",
             args: vec!["/bin/sh"],
             hostname: "bento-container",
+            rootless: true,  // Default to rootless for Bento.rs goals
         }
     }
 }
 
-pub fn test_fork_clone() -> nix::Result<()> {
-    let config = Config::default();
+pub fn create_container(config: &Config) -> Result<(), Error> {
+    println!("Parent PID: {}", getpid());
 
-    println!("Parent (main) process: PID = {}", getpid());
+    fork_intermediate(|| {
+        println!("Intermediate PID: {}", getpid());
 
-    match unsafe { fork() }? {
-        ForkResult::Parent { child } => {
-            println!("Created intermediate process with PID = {}", child);
-            waitpid(child, None)?;
+        let mut flags = CloneFlags::CLONE_NEWPID | CloneFlags::CLONE_NEWUTS | CloneFlags::CLONE_NEWNS;
+        if config.rootless {
+            flags |= CloneFlags::CLONE_NEWUSER;
+            // TODO: Add UID/GID mapping here (write to /proc/self/uid_map)
+            // Example: use std::fs::write("/proc/self/uid_map", "0 1000 1").expect("Mapping failed");
         }
-        ForkResult::Child => {
-            println!("Intermediate process: PID = {}", getpid());
 
-            let mut stack = [0u8; 4096 * 4];
-
-            let flags = CloneFlags::CLONE_NEWPID | CloneFlags::CLONE_NEWUTS | CloneFlags::CLONE_NEWNS;
-            let cb = Box::new(move || {
-                // This closure runs as "init" process
-                sethostname(config.hostname).expect("hostname failed");
-                println!("Init (container PID 1): new hostname set, my host PID: {}", getpid());
-
-                let args: Vec<CString> = config.args.iter()
-                    .map(|&s| CString::new(s).unwrap()).collect();
-                let ref_args: Vec<&CString> = args.iter().collect();
-
-                let sh = &args[0];
-                execvp(sh, &ref_args).expect("execvp failed");
-
-                0 // If execvp fails
-            });
-
-            let pid = unsafe { clone(cb, &mut stack, flags, Some(libc::SIGCHLD)) }?;
-            waitpid(pid, None)?;
+        if unshare_namespaces(flags).is_err() {
+            return 1;
         }
-    }
+
+        if clone_init(config, flags).is_err() {
+            return 1;
+        }
+
+        0  // Success exit code
+    })?;
+
     Ok(())
 }
 
