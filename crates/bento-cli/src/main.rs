@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand, ValueHint};
 use log::info;
 use std::path::PathBuf;
+use libbento::process::{create_container, Config};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -19,11 +20,23 @@ pub enum Commands {
         #[arg(short, long, required = true, value_hint = ValueHint::FilePath)]
         bundle: PathBuf,
     },
-    Start {},
-    State {},
+    Start {
+        #[arg(required = true)]
+        container_id: String,
+    },
+    State {
+        #[arg(required = true)]
+        container_id: String,
+    },
     List {},
-    Kill {},
-    Delete {},
+    Kill {
+        #[arg(required = true)]
+        container_id: String,
+    },
+    Delete {
+        #[arg(required = true)]
+        container_id: String,
+    },
 }
 
 fn main() {
@@ -33,7 +46,7 @@ fn main() {
 
     match args.command {
         Commands::Spec {} => {
-            println!("Spec");
+            println!("Spec command not implemented yet");
         }
         Commands::Create {
             container_id,
@@ -44,21 +57,34 @@ fn main() {
                 container_id,
                 bundle.display()
             );
+
+            let config = Config::default();  // TODO: Load from bundle/config.json
+
+            if let Err(e) = create_container(&config) {
+                eprintln!("Container creation failed: {e}");
+            }
         }
-        Commands::Start {} => {
-            println!("Start");
+        Commands::Start { container_id } => {
+            println!("Starting container '{}'", container_id);
+            // TODO: Implement start logic (e.g., resume from saved state/PID)
+            // Example: Load PID from state, signal to start
         }
-        Commands::State {} => {
-            println!("State");
+        Commands::State { container_id } => {
+            println!("State of container '{}'", container_id);
+            // TODO: Load and print container status (e.g., running, PID)
         }
         Commands::List {} => {
-            println!("List");
+            println!("Listing containers");
+            // TODO: List all created container IDs
         }
-        Commands::Kill {} => {
-            println!("Kill");
+        Commands::Kill { container_id } => {
+            println!("Killing container '{}'", container_id);
+            // TODO: Send signal to container PID
         }
-        Commands::Delete {} => {
-            println!("Delete");
+        Commands::Delete { container_id } => {
+            println!("Deleting container '{}'", container_id);
+            // TODO: Cleanup state/rootfs
         }
     }
 }
+
