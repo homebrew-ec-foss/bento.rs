@@ -47,10 +47,6 @@ pub struct Root {
     pub path: PathBuf,
     #[serde(default)]
     pub readonly: bool,
-    #[serde(default)]
-    pub upperdir: Option<PathBuf>,
-    #[serde(default)]
-    pub workdir: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -86,8 +82,6 @@ pub struct Linux {
     pub namespaces: Vec<Namespace>,
     #[serde(default)]
     pub resources: Option<Resources>,
-    #[serde(default)]
-    pub network: Option<Network>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -125,30 +119,11 @@ pub struct Cpu {
     pub shares: Option<u64>,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct Network {
-    #[serde(default)]
-    pub mode: Option<String>,
-    #[serde(default)]
-    pub ports: Vec<PortMapping>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct PortMapping {
-    pub container_port: u16,
-    pub host_port: u16,
-    #[serde(default)]
-    pub protocol: Option<String>,
-}
-
 #[serde_as]
 #[derive(Debug, Deserialize)]
 pub struct Runtime {
     #[serde(default = "Runtime::default_pivot_root")]
     pub pivot_root: bool,
-    #[serde_as(as = "Option<DisplayFromStr>")]
-    #[serde(default)]
-    pub pid_file: Option<PathBuf>,
 }
 
 impl Runtime { fn default_pivot_root() -> bool { true } }
@@ -169,9 +144,6 @@ impl Config {
         self.validate_rootless()?;
         self.validate_namespaces()?;
         self.validate_mounts()?;
-        self.validate_overlay()?;
-        self.validate_pid_file()?;
-        self.validate_network_mode()?;
         Ok(())
     }
 
@@ -241,56 +213,6 @@ impl Config {
                     return Err(ConfigError::Invalid(
                         format!("sysfs mount must be at /sys, got {:?}", m.destination))),
                 _ => {}
-            }
-        }
-        Ok(())
-    }
-
-    fn validate_overlay(&self) -> Result<(), ConfigError> {
-        let overlay_requested = self.root.upperdir.is_some() || self.root.workdir.is_some();
-        if !overlay_requested { return Ok(()) }
-        let root_mount = self.mounts.iter()
-            .find(|m| m.destination == Path::new("/"));
-        if let Some(m) = root_mount {
-            if m.fs_type != "overlay" {
-                return Err(ConfigError::Invalid(
-                    "upperdir/workdir provided but / mount is not overlay".into()));
-            }
-        } else {
-            return Err(ConfigError::Invalid(
-                "overlayfs requested but no mount with destination /".into()));
-        }
-        Ok(())
-    }
-
-    fn validate_pid_file(&self) -> Result<(), ConfigError> {
-        if let Some(rt) = &self.runtime {
-            if let Some(pid) = &rt.pid_file {
-                let parent = pid.parent().ok_or_else(|| ConfigError::Invalid(
-                    format!("pid_file {:?} has no parent directory", pid)))?;
-                if !parent.is_dir() {
-                    return Err(ConfigError::Invalid(
-                        format!("pid_file parent {:?} does not exist", parent)));
-                }
-                if fs::OpenOptions::new().write(true).create(true).open(pid).is_err() {
-                    return Err(ConfigError::Invalid(
-                        format!("cannot write pid_file {:?}", pid)));
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn validate_network_mode(&self) -> Result<(), ConfigError> {
-        const ALLOWED: &[&str] = &["slirp", "bridge", "host", "none"];
-        if let Some(linux) = &self.linux {
-            if let Some(net) = &linux.network {
-                if let Some(mode) = &net.mode {
-                    if !ALLOWED.contains(&mode.as_str()) {
-                        return Err(ConfigError::Invalid(format!(
-                            "unsupported network mode {:?}", mode)));
-                    }
-                }
             }
         }
         Ok(())
