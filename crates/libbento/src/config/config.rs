@@ -21,7 +21,6 @@ pub enum ConfigError {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-
 pub struct RawConfig {
    pub oci_version : String,
    pub root : Root,
@@ -55,7 +54,6 @@ pub struct Config {
    pub linux : LinuxConfig, // it was Option<Linux>
    pub runtime : RuntimeConfig,
    pub extra : HashMap<String, serde_json::Value>,
-
 }
 
 #[derive(Debug)]
@@ -204,6 +202,7 @@ impl<'de> Deserialize<'de> for Config {
         })
     }
 }
+
 impl Config {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
          let file = File::open(&path)?;
@@ -212,7 +211,6 @@ impl Config {
          cfg.resolve_root_rel_to_bundle(&path)?;
          Ok(cfg)
     }
-
 
     fn resolve_root_rel_to_bundle<P: AsRef<Path>>(
         &mut self,
@@ -226,5 +224,4 @@ impl Config {
         self.root.path = abs.canonicalize()?;
         Ok(())
     }
-
 }

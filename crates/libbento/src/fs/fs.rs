@@ -39,7 +39,9 @@ fn mount_proc(rootfs: &Path) -> Result<()> {
         Some("proc"),
         MsFlags::empty(),
         None::<&str>,
-    ).context("Failed to mount proc filesystem")
+    ).context("Failed to mount proc filesystem")?;
+
+    Ok(())
 }
 
 fn mount_sys(rootfs: &Path) -> Result<()> {
@@ -52,7 +54,8 @@ fn mount_sys(rootfs: &Path) -> Result<()> {
         Some("sysfs"),
         MsFlags::empty(),
         None::<&str>,
-    ).context("Failed to mount sys filesystem")
+    ).context("Failed to mount sys filesystem")?;
+    Ok(())
 }
 
 fn mount_dev(rootfs: &Path) -> Result<()> {
@@ -82,9 +85,14 @@ fn create_base_device_nodes(dev_path: &Path) -> Result<()> {
 
     for (name, major, minor) in devices {
         let path = dev_path.join(name);
+        let path_str = path.to_str()
+            .with_context(|| format!("Failed to convert path to string: {:?}", path))?;
+        let c_path = CString::new(path_str)
+            .with_context(|| format!("Failed to create CString from path: {}", path_str))?;
+            
         mknod(
-            &CString::new(path.to_str().unwrap()).unwrap(),
-            SFlag::s_ifchr,
+            &c_path, 
+            SFlag::S_IFCHR,
             Mode::from_bits(0o666).unwrap(),
             nix::libc::makedev(major, minor),
         ).context(format!("failed to create device {}", name))?;
