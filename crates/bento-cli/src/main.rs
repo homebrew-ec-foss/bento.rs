@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand, ValueHint};
-use log::info;
+use libbento::config::Config;           
+use log::{error, info};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -27,38 +28,34 @@ pub enum Commands {
 }
 
 fn main() {
+    env_logger::init();                   // convenience
     info!("Starting Bento CLI");
 
     let args = Cli::parse();
 
     match args.command {
-        Commands::Spec {} => {
-            println!("Spec");
+        Commands::Spec {} => println!("Spec"),
+        Commands::Create { container_id, bundle } => {
+            let cfg_path = bundle.join("config.json");
+            match Config::load(&cfg_path) {
+                Ok(cfg) => {
+                    println!(
+                        "Container '{}' validated. rootfs = {}",
+                        container_id,
+                        cfg.root.path.display()
+                    );
+                    // → pass `cfg` into your `create()` implementation next
+                }
+                Err(e) => {
+                    error!("Invalid bundle: {}", e);
+                    std::process::exit(1);
+                }
+            }
         }
-        Commands::Create {
-            container_id,
-            bundle,
-        } => {
-            println!(
-                "Creating container '{}' with bundle '{}'",
-                container_id,
-                bundle.display()
-            );
-        }
-        Commands::Start {} => {
-            println!("Start");
-        }
-        Commands::State {} => {
-            println!("State");
-        }
-        Commands::List {} => {
-            println!("List");
-        }
-        Commands::Kill {} => {
-            println!("Kill");
-        }
-        Commands::Delete {} => {
-            println!("Delete");
-        }
+        Commands::Start {} => println!("Start"),
+        Commands::State {} => println!("State"),
+        Commands::List {} => println!("List"),
+        Commands::Kill {} => println!("Kill"),
+        Commands::Delete {} => println!("Delete"),
     }
 }
