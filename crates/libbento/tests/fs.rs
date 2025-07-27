@@ -2,33 +2,31 @@
 mod tests {
     use std::path::PathBuf;
     use tempfile::TempDir;
-    use std::{fs,io};
+    use std::fs;
 
-    // Mock implementations for testing 
+    // Simple mock implementations
     mod mock {
-        use super::*;
         use std::collections::HashMap;
         use std::sync::Mutex;
         
-        // Global state to track mock ops
         lazy_static::lazy_static! {
             static ref MOCK_MOUNTS: Mutex<HashMap<String, String>> = Mutex::new(HashMap::new());
             static ref MOCK_DEVICES: Mutex<Vec<String>> = Mutex::new(Vec::new());
         }
         
-        pub fn mock_mount(target: &str, fstype: &str) -> Result<(), io::Error> {
+        pub fn mock_mount(target: &str, fstype: &str) -> Result<(), std::io::Error> {
             let mut mounts = MOCK_MOUNTS.lock().unwrap();
             mounts.insert(target.to_string(), fstype.to_string());
             Ok(())
         }
         
-        pub fn mock_umount(target: &str) -> Result<(),io::Error> {
+        pub fn mock_umount(target: &str) -> Result<(), std::io::Error> {
             let mut mounts = MOCK_MOUNTS.lock().unwrap();
             mounts.remove(target);
             Ok(())
         }
         
-        pub fn mock_mknod(path: &str, _major: u64, _minor: u64) -> Result<(),io::Error> {
+        pub fn mock_mknod(path: &str) -> Result<(), std::io::Error> {
             let mut devices = MOCK_DEVICES.lock().unwrap();
             devices.push(path.to_string());
             std::fs::File::create(path)?;
@@ -50,48 +48,97 @@ mod tests {
     }
 
     #[test]
-    fn test_directory_creation() {
+    fn test_prepare_rootfs_directories() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
-        let rootfs = temp_dir.path();
+        let container_id = "test_container";
         
-        // Testing whether directories are created properly
-        let proc_path = rootfs.join("proc");
-        let sys_path = rootfs.join("sys");
-        let dev_path = rootfs.join("dev");
+        // Test directory structure that prepare_rootfs would create
+        let base_path = temp_dir.path().join("var/lib/container");
+        let rootfs = base_path.join(container_id).join("rootfs");
+        let old_root = rootfs.join(".old_root");
         
-        fs::create_dir_all(&proc_path).expect("Failed to create proc dir");
-        fs::create_dir_all(&sys_path).expect("Failed to create sys dir");
-        fs::create_dir_all(&dev_path).expect("Failed to create dev dir");
+        fs::create_dir_all(&rootfs).expect("Failed to create rootfs");
+        fs::create_dir_all(&old_root).expect("Failed to create old_root");
         
-        assert!(proc_path.exists());
-        assert!(proc_path.is_dir());
-        assert!(sys_path.exists());
-        assert!(sys_path.is_dir());
-        assert!(dev_path.exists());
-        assert!(dev_path.is_dir());
+        assert!(rootfs.exists());
+        assert!(old_root.exists());
+        assert!(rootfs.is_dir());
+        assert!(old_root.is_dir());
     }
 
     #[test]
-    fn test_device_node_creation_logic() {
+    fn test_mount_proc() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let rootfs = temp_dir.path();
+        let proc_path = rootfs.join("proc");
+        
+        fs::create_dir_all(&proc_path).expect("Failed to create proc directory");
+        
+        // Mock proc mount
+        mock::mock_mount(&proc_path.to_string_lossy(), "proc")
+            .expect("Mock proc mount failed");
+        
+        let mounts = mock::get_mock_mounts();
+        assert!(mounts.contains_key(&proc_path.to_string_lossy().to_string()));
+        assert_eq!(mounts[&proc_path.to_string_lossy().to_string()], "proc");
+        
+        mock::clear_mocks();
+    }
+
+    #[test]
+    fn test_mount_sys() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let rootfs = temp_dir.path();
+        let sys_path = rootfs.join("sys");
+        
+        fs::create_dir_all(&sys_path).expect("Failed to create sys directory");
+        
+        // Mock sys mount
+        mock::mock_mount(&sys_path.to_string_lossy(), "sysfs")
+            .expect("Mock sys mount failed");
+        
+        let mounts = mock::get_mock_mounts();
+        assert!(mounts.contains_key(&sys_path.to_string_lossy().to_string()));
+        assert_eq!(mounts[&sys_path.to_string_lossy().to_string()], "sysfs");
+        
+        mock::clear_mocks();
+    }
+
+    #[test]
+    fn test_mount_dev() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let rootfs = temp_dir.path();
+        let dev_path = rootfs.join("dev");
+        
+        fs::create_dir_all(&dev_path).expect("Failed to create dev directory");
+        
+        // Mock dev mount
+        mock::mock_mount(&dev_path.to_string_lossy(), "tmpfs")
+            .expect("Mock dev mount failed");
+        
+        let mounts = mock::get_mock_mounts();
+        assert!(mounts.contains_key(&dev_path.to_string_lossy().to_string()));
+        assert_eq!(mounts[&dev_path.to_string_lossy().to_string()], "tmpfs");
+        
+        mock::clear_mocks();
+    }
+
+    #[test]
+    fn test_create_base_device_nodes() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let dev_path = temp_dir.path().join("dev");
         fs::create_dir_all(&dev_path).expect("Failed to create dev directory");
         
-        //  Here it tests device creation  
-          let devices = [
+        let devices = [
             ("null", 1, 3),
             ("urandom", 1, 9),
             ("tty", 5, 0),
         ];
         
-        for (name, major, minor) in devices {
-            let path = dev_path.join(name);
-            let path_str = path.to_str().expect("Failed to convert path to string");
-            
-            assert!(path_str.contains(name));
-            assert!(path.parent().unwrap() == dev_path);
-            
-            mock::mock_mknod(path_str, major, minor).expect("Mock device creation failed");
+        for (name, _major, _minor) in devices {
+            let device_path = dev_path.join(name);
+            mock::mock_mknod(&device_path.to_string_lossy())
+                .expect("Mock device creation failed");
         }
         
         let created_devices = mock::get_mock_devices();
@@ -104,82 +151,50 @@ mod tests {
     }
 
     #[test]
-    fn test_path_handling() {
-        let temp_dir = TempDir::new().expect("Failed to create temp dir");
-        let rootfs = temp_dir.path();
+    fn test_verify_device_node() {
+        let devices = [
+            ("null", 1, 3),
+            ("urandom", 1, 9),
+            ("tty", 5, 0),
+        ];
         
-        // Testing path joining logic
-        let proc_path = rootfs.join("proc");
-        let sys_path = rootfs.join("sys");
-        let dev_path = rootfs.join("dev");
-        
-        assert_eq!(proc_path.file_name().unwrap(), "proc");
-        assert_eq!(sys_path.file_name().unwrap(), "sys");
-        assert_eq!(dev_path.file_name().unwrap(), "dev");
-        
-        // Test path to str conversion
-        assert!(proc_path.to_str().is_some());
-        assert!(sys_path.to_str().is_some());
-        assert!(dev_path.to_str().is_some());
+        // Test device major/minor numbers are correct
+        for (name, major, minor) in devices {
+            assert!(major > 0, "Major number should be positive for {}", name);
+            
+            // Test makedev calculation
+            let dev_id = nix::libc::makedev(major, minor);
+            let extracted_major = (dev_id >> 8) & 0xff;
+            let extracted_minor = dev_id & 0xff;
+            
+            assert_eq!(extracted_major, major.into());
+            assert_eq!(extracted_minor, minor.into());
+        }
     }
 
     #[test]
-    fn test_error_handling_paths() {
-        let bad_path = PathBuf::from("");
-        let result = bad_path.to_str();
-        assert!(result.is_some()); // Empty path should still convert
-        
-        let relative_path = PathBuf::from("./test");
-        assert!(relative_path.to_str().is_some());
-    }
-
-    #[test]
-    fn test_mount_sequence_logic() {
+    fn test_cleanup_fs() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let rootfs = temp_dir.path();
         
-        // Create directories
-        fs::create_dir_all(rootfs.join("proc")).expect("Failed to create proc");
-        fs::create_dir_all(rootfs.join("sys")).expect("Failed to create sys");
-        fs::create_dir_all(rootfs.join("dev")).expect("Failed to create dev");
-        
-        // Mock the mounting sequence
-        mock::mock_mount(&rootfs.join("proc").to_string_lossy(), "proc")
-            .expect("Mock proc mount failed");
-        mock::mock_mount(&rootfs.join("sys").to_string_lossy(), "sysfs")
-            .expect("Mock sys mount failed");
-        mock::mock_mount(&rootfs.join("dev").to_string_lossy(), "tmpfs")
-            .expect("Mock dev mount failed");
-        
-        let mounts = mock::get_mock_mounts();
-        assert_eq!(mounts.len(), 3);
-        assert!(mounts.values().any(|v| v == "proc"));
-        assert!(mounts.values().any(|v| v == "sysfs"));
-        assert!(mounts.values().any(|v| v == "tmpfs"));
-        
-        mock::clear_mocks();
-    }
-
-    #[test]
-    fn test_cleanup_sequence_logic() {
-        let temp_dir = TempDir::new().expect("Failed to create temp dir");
-        let rootfs = temp_dir.path();
-        
-        // Setting up mock mounts
-        let dev_path = rootfs.join("dev").to_string_lossy().to_string();
-        let sys_path = rootfs.join("sys").to_string_lossy().to_string();
+        // Set up mock mounts in order
         let proc_path = rootfs.join("proc").to_string_lossy().to_string();
+        let sys_path = rootfs.join("sys").to_string_lossy().to_string();
+        let dev_path = rootfs.join("dev").to_string_lossy().to_string();
+        let rootfs_str = rootfs.to_string_lossy().to_string();
         
-        mock::mock_mount(&proc_path, "proc").expect("Mock proc mount failed");
-        mock::mock_mount(&sys_path, "sysfs").expect("Mock sys mount failed");
-        mock::mock_mount(&dev_path, "tmpfs").expect("Mock dev mount failed");
+        mock::mock_mount(&proc_path, "proc").unwrap();
+        mock::mock_mount(&sys_path, "sysfs").unwrap();
+        mock::mock_mount(&dev_path, "tmpfs").unwrap();
+        mock::mock_mount(&rootfs_str, "bind").unwrap();
         
-        assert_eq!(mock::get_mock_mounts().len(), 3);
+        assert_eq!(mock::get_mock_mounts().len(), 4);
         
-        // Test cleanup sequence : reverse
+        // Test cleanup in reverse order (like cleanup_fs function)
         mock::mock_umount(&dev_path).expect("Mock dev umount failed");
         mock::mock_umount(&sys_path).expect("Mock sys umount failed");
         mock::mock_umount(&proc_path).expect("Mock proc umount failed");
+        mock::mock_umount(&rootfs_str).expect("Mock rootfs umount failed");
         
         assert_eq!(mock::get_mock_mounts().len(), 0);
         
@@ -187,91 +202,118 @@ mod tests {
     }
 
     #[test]
-    fn test_device_major_minor_numbers() {
-        let devices = [
-            ("null", 1, 3),
-            ("urandom", 1, 9),
-            ("tty", 5, 0),
-        ];
+    fn test_force_unmount() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let test_path = temp_dir.path().join("test_mount");
+        fs::create_dir_all(&test_path).expect("Failed to create test directory");
         
-        for (name, expected_major, expected_minor) in devices {
-            match name {
-                "null" => {
-                    assert_eq!(expected_major, 1);
-                    assert_eq!(expected_minor, 3);
-                }
-                "urandom" => {
-                    assert_eq!(expected_major, 1);
-                    assert_eq!(expected_minor, 9);
-                }
-                "tty" => {
-                    assert_eq!(expected_major, 5);
-                    assert_eq!(expected_minor, 0);
-                }
-                _ => panic!("Unexpected device: {}", name),
-            }
-        }
+        let path_str = test_path.to_string_lossy().to_string();
+        
+        // Mock mount first
+        mock::mock_mount(&path_str, "tmpfs").expect("Mock mount failed");
+        assert!(mock::get_mock_mounts().contains_key(&path_str));
+        
+        // Test unmount
+        mock::mock_umount(&path_str).expect("Mock umount failed");
+        assert!(!mock::get_mock_mounts().contains_key(&path_str));
+        
+        mock::clear_mocks();
     }
 
     #[test]
-    fn test_file_permissions_logic() {
-        let mode = 0o666;
-        
-        // Checking permissions  below 
-        // owner read and write
-        assert_eq!(mode & 0o400, 0o400); 
-        assert_eq!(mode & 0o200, 0o200); 
-        // grp read and write
-        assert_eq!(mode & 0o040, 0o040); 
-        assert_eq!(mode & 0o020, 0o020); 
-        // others read and write
-        assert_eq!(mode & 0o004, 0o004);  
-        assert_eq!(mode & 0o002, 0o002); 
-        
-        assert_eq!(mode & 0o111, 0); // no execute for anyone
-    }
-
-    #[test]
-    fn test_cstring_conversion() {
+    fn test_path_conversions() {
         let test_paths = vec![
             "/dev/null",
             "/dev/urandom",
             "/dev/tty",
-            "simple_path",
-            "/complex/path/with/multiple/components",
+            "/var/lib/container/test/rootfs",
         ];
         
-        for path in test_paths {
-            let cstring_result = std::ffi::CString::new(path);
-            assert!(cstring_result.is_ok(), "Failed to convert path to CString: {}", path);
+        for path_str in test_paths {
+            let path = PathBuf::from(path_str);
             
-            let cstring = cstring_result.unwrap();
-            let back_to_str = cstring.to_str();
-            assert!(back_to_str.is_ok(), "Failed to convert CString back to str");
-            assert_eq!(back_to_str.unwrap(), path);
+            // Test path to string conversion
+            assert!(path.to_str().is_some());
+            assert_eq!(path.to_str().unwrap(), path_str);
+            
+            // Test CString conversion
+            let cstring = std::ffi::CString::new(path_str);
+            assert!(cstring.is_ok());
+            
+            let cstring = cstring.unwrap();
+            assert_eq!(cstring.to_str().unwrap(), path_str);
         }
     }
 
     #[test]
-    fn test_makedev_calculation() {
-        // Test that makedev calculation works as expected
-        use nix::libc::makedev;
+    fn test_directory_creation_logic() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let rootfs = temp_dir.path();
         
-        let test_devices = [
-            (1, 3),  // null
-            (1, 9),  // urandom
-            (5, 0),  // tty
-        ];
+        // Test creating filesystem directories
+        let proc_path = rootfs.join("proc");
+        let sys_path = rootfs.join("sys");
+        let dev_path = rootfs.join("dev");
         
-        for (major, minor) in test_devices {
-            let dev_id = makedev(major, minor);
-            
-            // Extract major and minor back from dev_id to verify
-            let extracted_major = (dev_id >> 8) & 0xff;
-            let extracted_minor = dev_id & 0xff;
-            
-            assert_eq!(extracted_major as u64, major.into());
-            assert_eq!(extracted_minor as u64, minor.into());
-        }
+        fs::create_dir_all(&proc_path).expect("Failed to create proc");
+        fs::create_dir_all(&sys_path).expect("Failed to create sys");
+        fs::create_dir_all(&dev_path).expect("Failed to create dev");
+        
+        assert!(proc_path.exists() && proc_path.is_dir());
+        assert!(sys_path.exists() && sys_path.is_dir());
+        assert!(dev_path.exists() && dev_path.is_dir());
+        
+        // Test path properties
+        assert_eq!(proc_path.file_name().unwrap(), "proc");
+        assert_eq!(sys_path.file_name().unwrap(), "sys");
+        assert_eq!(dev_path.file_name().unwrap(), "dev");
+    }
+
+    #[test]
+    fn test_mount_sequence() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let rootfs = temp_dir.path();
+        
+        // Test the typical mount sequence from prepare_rootfs
+        let rootfs_str = rootfs.to_string_lossy().to_string();
+        let proc_path = rootfs.join("proc").to_string_lossy().to_string();
+        let sys_path = rootfs.join("sys").to_string_lossy().to_string();
+        let dev_path = rootfs.join("dev").to_string_lossy().to_string();
+        
+        // Mount in order
+        mock::mock_mount(&rootfs_str, "bind").unwrap();
+        mock::mock_mount(&proc_path, "proc").unwrap();
+        mock::mock_mount(&sys_path, "sysfs").unwrap();
+        mock::mock_mount(&dev_path, "tmpfs").unwrap();
+        
+        let mounts = mock::get_mock_mounts();
+        assert_eq!(mounts.len(), 4);
+        assert_eq!(mounts[&proc_path], "proc");
+        assert_eq!(mounts[&sys_path], "sysfs");
+        assert_eq!(mounts[&dev_path], "tmpfs");
+        assert_eq!(mounts[&rootfs_str], "bind");
+        
+        mock::clear_mocks();
+    }
+
+    #[test]
+    fn test_device_permissions() {
+        // Test file permission bits (0o666 = rw-rw-rw-)
+        let mode = 0o666;
+        
+        // Owner permissions
+        assert_eq!(mode & 0o400, 0o400); // read
+        assert_eq!(mode & 0o200, 0o200); // write
+        
+        // Group permissions
+        assert_eq!(mode & 0o040, 0o040); // read
+        assert_eq!(mode & 0o020, 0o020); // write
+        
+        // Other permissions
+        assert_eq!(mode & 0o004, 0o004); // read
+        assert_eq!(mode & 0o002, 0o002); // write
+        
+        // No execute permissions
+        assert_eq!(mode & 0o111, 0);
     }
 }
