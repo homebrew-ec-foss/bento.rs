@@ -46,7 +46,7 @@ fn main() {
 
     match args.command {
         Commands::Spec {} => {
-            println!("Spec command not implemented yet");
+	    todo!("Generate OCI spec template");
         }
         Commands::Create {
             container_id,
@@ -66,24 +66,23 @@ fn main() {
         }
         Commands::Start { container_id } => {
             println!("Starting container '{}'", container_id);
-            // TODO: Implement start logic (e.g., resume from saved state/PID)
-            // Example: Load PID from state, signal to start
+            todo!("Generate OCI spec template");
         }
         Commands::State { container_id } => {
             println!("State of container '{}'", container_id);
-            // TODO: Load and print container status (e.g., running, PID)
+            todo!("Load and display container status from state file");
         }
         Commands::List {} => {
             println!("Listing containers");
-            // TODO: List all created container IDs
+            todo!("Enumerate all container state files");
         }
         Commands::Kill { container_id } => {
             println!("Killing container '{}'", container_id);
-            // TODO: Send signal to container PID
+            todo!("Send termination signal to container process");
         }
         Commands::Delete { container_id } => {
             println!("Deleting container '{}'", container_id);
-            // TODO: Cleanup state/rootfs
+           todo!("Clean up container state and resources");
         }
     }
 }

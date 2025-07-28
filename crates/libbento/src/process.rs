@@ -2,15 +2,14 @@
 
 use nix::unistd::getpid;
 use nix::unistd::{pipe, read, write};
-use std::os::unix::io::AsRawFd;
+use std::os::unix::io::{AsRawFd, OwnedFd};
 use anyhow::{Result, anyhow};
-use std::ffi::CString;
-use nix::unistd::execvp;
+use nix::unistd::{Pid};
 use crate::syscalls::{
     fork_intermediate,
-    unshare_user_namespace, 
+    unshare_user_namespace,
     unshare_remaining_namespaces,
-    disable_setgroups_for_child, 
+    disable_setgroups_for_child,
     map_user_namespace_rootless
 };
 
@@ -27,7 +26,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             root_path: "/tmp/bento-rootfs".to_string(),
-            args: vec!["/usr/bin/id".to_string()],
+            args: vec!["/bin/cat".to_string(), "/proc/self/stat".to_string()],
             hostname: "bento-container".to_string(),
             rootless: true,
             bundle_path: ".".to_string(),
@@ -36,22 +35,14 @@ impl Default for Config {
     }
 }
 
-//Initial Wait method
-// Parent
-	// Simple waiting - give child time to create user namespace
-	//std::thread::sleep(std::time::Duration::from_millis(50));
-
-//Child
-        // Give parent time to do mapping
-        // std::thread::sleep(std::time::Duration::from_millis(100));
 pub fn create_container(config: &Config) -> Result<()> {
     // Create bidirectional communication channels
     let parent_to_child = pipe().map_err(|e| anyhow!("Failed to create parent->child pipe: {}", e))?;
     let child_to_parent = pipe().map_err(|e| anyhow!("Failed to create child->parent pipe: {}", e))?;
     
     println!("[Sync] Pipes created:");
-    println!("  Parent->Child: read_fd={}, write_fd={}", parent_to_child.0.as_raw_fd(), parent_to_child.1.as_raw_fd());
-    println!("  Child->Parent: read_fd={}, write_fd={}", child_to_parent.0.as_raw_fd(), child_to_parent.1.as_raw_fd());
+    println!(" Parent->Child: read_fd={}, write_fd={}", parent_to_child.0.as_raw_fd(), parent_to_child.1.as_raw_fd());
+    println!(" Child->Parent: read_fd={}, write_fd={}", child_to_parent.0.as_raw_fd(), child_to_parent.1.as_raw_fd());
     
     println!("Bento.rs Rootless Container Runtime");
     println!("Parent PID: {} (running as unprivileged user)", getpid());
@@ -61,108 +52,143 @@ pub fn create_container(config: &Config) -> Result<()> {
         .map_err(|e| anyhow!("Failed to clone parent write FD: {}", e))?;
     let parent_read_fd = child_to_parent.0.try_clone()
         .map_err(|e| anyhow!("Failed to clone parent read FD: {}", e))?;
-    
     let child_read_fd = parent_to_child.0.try_clone()
         .map_err(|e| anyhow!("Failed to clone child read FD: {}", e))?;
     let child_write_fd = child_to_parent.1.try_clone()
         .map_err(|e| anyhow!("Failed to clone child write FD: {}", e))?;
 
-    let parent_logic = move |child_pid| -> Result<()> {
-        println!("[Parent] Child spawned with PID: {}", child_pid);
-        
-        // Close unused pipe ends in parent
-        drop(parent_to_child.0);  // Don't need to read from parent->child
-        drop(child_to_parent.1);  // Don't need to write to child->parent
-        
-        // Wait for child to signal that user namespace is ready
-        println!("[Parent] Waiting for child namespace ready signal...");
-        let mut buf = [0u8; 1];
-        if let Err(e) = read(parent_read_fd, &mut buf) {
-            eprintln!("[Parent] Failed to read namespace ready signal: {}", e);
-            return Err(anyhow!("Failed to receive namespace ready signal"));
-        }
-        
-        if buf[0] != b'R' {  // 'R' for Ready
-            return Err(anyhow!("Invalid namespace ready signal received: {}", buf[0]));
-        }
-        println!("[Parent] Received namespace ready signal from child");
-        
-        // Now safely perform UID/GID mapping
-        map_user_namespace_rootless(child_pid)?;
-        println!("[Parent] Mapping complete");
-        
-        // Signal child that mapping is complete
-        if let Err(e) = write(parent_write_fd, b"M") {  // 'M' for Mapping complete
-            eprintln!("[Parent] Failed to signal mapping complete: {}", e);
-            return Err(anyhow!("Failed to signal mapping complete"));
-        }
-        println!("[Parent] Signaled mapping complete to child");
-        
-        Ok(())
+    // Cleaner functions  
+    let parent_sync_handler = move |child_pid| -> Result<()> {
+        handle_namespace_synchronization(
+            child_pid, 
+            parent_read_fd, 
+            parent_write_fd,
+            parent_to_child.0,
+            child_to_parent.1
+        )
     };
-
-    let child_logic = move || -> isize {
-        println!("[Child] Child process started, PID: {}", getpid());
-        
-        // Close unused pipe ends in child
-        drop(parent_to_child.1);  // Don't need to write to parent->child
-        drop(child_to_parent.0);  // Don't need to read from child->parent
-        
-        // Phase 1: Create user namespace
-        if unshare_user_namespace().is_err() {
-            eprintln!("[Child] Failed to create user namespace");
-            return 1;
-        }
-        
-        // Disable setgroups for safe mapping
-        if disable_setgroups_for_child().is_err() {
-            eprintln!("[Child] Failed to disable setgroups");
-            return 1;
-        }
-        
-        // Signal parent that namespace is ready for mapping
-        println!("[Child] Signaling namespace ready to parent");
-        if let Err(e) = write(child_write_fd, b"R") {  // 'R' for Ready
-            eprintln!("[Child] Failed to signal namespace ready: {}", e);
-            return 1;
-        }
-        
-        // Wait for parent to complete mapping
-        println!("[Child] Waiting for mapping complete signal...");
-        let mut buf = [0u8; 1];
-        if let Err(e) = read(child_read_fd, &mut buf) {
-            eprintln!("[Child] Failed to read mapping complete signal: {}", e);
-            return 1;
-        }
-        
-        if buf[0] != b'M' {  // 'M' for Mapping complete
-            eprintln!("[Child] Invalid mapping complete signal received: {}", buf[0]);
-            return 1;
-        }
-        println!("[Child] Received mapping complete signal");
-        
-        // Phase 2: Create remaining namespaces (now safe with proper UID/GID mapping)
-        if unshare_remaining_namespaces().is_err() {
-            eprintln!("[Child] Failed to create remaining namespaces");
-            return 1;
-        }
-        
-        // Phase 3: Execute target command
-        println!("[Child] Executing command: {:?}", config.args);
-        let command = CString::new(config.args[0].as_str()).unwrap();
-        let args: Vec<CString> = config.args.iter()
-            .map(|s| CString::new(s.as_str()).unwrap())
-            .collect();
-
-        match execvp(&command, &args) {
-            Ok(_) => 0,
-            Err(e) => {
-                eprintln!("[Child] execvp failed: {}", e);
-                1
-            }
-        }
+    
+    let container_bootstrap = move || -> isize {
+        execute_container_initialization(
+            config, 
+            child_read_fd, 
+            child_write_fd,
+            parent_to_child.1,
+            child_to_parent.0
+        )
     };
-
-    fork_intermediate(parent_logic, child_logic)?;
+    
+    fork_intermediate(parent_sync_handler, container_bootstrap)?;
     Ok(())
 }
+
+// Main process function  
+fn handle_namespace_synchronization(
+    child_pid: Pid, 
+    read_fd: OwnedFd, 
+    write_fd: OwnedFd,
+    unused_parent_read: OwnedFd,
+    unused_child_write: OwnedFd,
+) -> Result<()> {
+    println!("[Parent] Child spawned with PID: {}", child_pid);
+    
+    // Close unused pipe ends in parent
+    drop(unused_parent_read);    // Don't need to read from parent->child
+    drop(unused_child_write);    // Don't need to write to child->parent
+    
+    // Wait for child namespace ready signal
+    println!("[Parent] Waiting for child namespace ready signal...");
+    let mut buf = [0u8; 1];
+    read(read_fd, &mut buf)
+        .map_err(|e| anyhow!("Failed to receive namespace ready signal: {}", e))?;
+    
+    if buf[0] != b'R' {
+        return Err(anyhow!("Invalid namespace ready signal received: {}", buf[0]));
+    }
+    
+    println!("[Parent] Received namespace ready signal from child");
+    
+    // Perform UID/GID mapping
+    map_user_namespace_rootless(child_pid)?;
+    println!("[Parent] UID/GID mapping completed successfully");
+    
+    // Signal mapping complete
+    write(write_fd, b"M")
+        .map_err(|e| anyhow!("Failed to signal mapping complete: {}", e))?;
+    println!("[Parent] Signaled mapping completion to child");
+    
+    Ok(())
+}
+
+// Intermediate function
+fn execute_container_initialization(
+    _config: &Config, 
+    read_fd: OwnedFd, 
+    write_fd: OwnedFd,
+    unused_parent_write: OwnedFd,
+    unused_child_read: OwnedFd,
+) -> isize {
+    println!("[Child] Container initialization started, PID: {}", getpid());
+    
+    // Close unused pipe ends in child
+    drop(unused_parent_write);   // Don't need to write to parent->child
+    drop(unused_child_read);     // Don't need to read from child->parent
+    
+    // Phase 1: Create user namespace
+    if unshare_user_namespace().is_err() {
+        eprintln!("[Child] Failed to create user namespace");
+        return 1;
+    }
+    
+    // Disable setgroups for safe mapping
+    if disable_setgroups_for_child().is_err() {
+        eprintln!("[Child] Failed to disable setgroups");
+        return 1;
+    }
+    
+    // Signal parent that namespace is ready
+    println!("[Child] Signaling namespace ready to parent");
+    if write(write_fd, b"R").is_err() {
+        eprintln!("[Child] Failed to signal namespace ready");
+        return 1;
+    }
+    
+    // Wait for mapping completion
+    println!("[Child] Waiting for mapping complete signal...");
+    let mut buf = [0u8; 1];
+    if read(read_fd, &mut buf).is_err() {
+        eprintln!("[Child] Failed to read mapping complete signal");
+        return 1;
+    }
+    
+    if buf[0] != b'M' {
+        eprintln!("[Child] Invalid mapping complete signal received");
+        return 1;
+    }
+    
+    println!("[Child] Received mapping complete signal");
+    
+    // Phase 2: Create remaining namespaces
+    if unshare_remaining_namespaces().is_err() {
+        eprintln!("[Child] Failed to create remaining namespaces");
+        return 1;
+    }
+    
+    // Phase 3: Execute target command
+    /*println!("[Child] Executing command: {:?}", config.args);
+    let command = CString::new(config.args[0].as_str()).unwrap();
+    let args: Vec<CString> = config.args.iter()
+        .map(|s| CString::new(s.as_str()).unwrap())
+        .collect();
+    
+    match execvp(&command, &args) {
+        Ok(_) => 0,
+        Err(e) => {
+            eprintln!("[Child] execvp failed: {}", e);
+            1
+        }
+    }*/
+    println!("[Child] Exiting create process - container is created but not started");
+    0
+}
+
