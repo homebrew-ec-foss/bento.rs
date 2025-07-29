@@ -6,9 +6,37 @@ use crate::syscalls::{
 };
 use anyhow::{Result, anyhow};
 use nix::unistd::Pid;
-use nix::unistd::getpid;
-use nix::unistd::{pipe, read, write};
+use nix::unistd::{ForkResult, fork, getpid, pipe, read, write};
 use std::os::unix::io::{AsRawFd, OwnedFd};
+
+// ============================================================================
+// SYNC SIGNAL DEFINITIONS
+// ============================================================================
+
+#[repr(u8)]
+#[derive(Debug, Copy, Clone, PartialEq)]
+enum SyncSignal {
+    Ready = b'R',
+    Mapped = b'M',
+}
+
+impl SyncSignal {
+    fn as_byte(&self) -> u8 {
+        *self as u8
+    }
+
+    fn from_byte(byte: u8) -> Result<Self> {
+        match byte {
+            b'R' => Ok(SyncSignal::Ready),
+            b'M' => Ok(SyncSignal::Mapped),
+            _ => Err(anyhow!("Invalid sync signal byte: {}", byte as char)),
+        }
+    }
+
+    fn as_char(&self) -> char {
+        self.as_byte() as char
+    }
+}
 
 pub struct Config {
     pub root_path: String,
@@ -32,182 +60,251 @@ impl Default for Config {
     }
 }
 
-pub fn create_container(config: &Config) -> Result<()> {
-    // Create bidirectional communication channels
-    let parent_to_child =
-        pipe().map_err(|e| anyhow!("Failed to create parent->child pipe: {}", e))?;
-    let child_to_parent =
-        pipe().map_err(|e| anyhow!("Failed to create child->parent pipe: {}", e))?;
+// ============================================================================
+// PIPE MANAGEMENT HELPERS (Internal Refactoring)
+// ============================================================================
 
-    println!("[Sync] Pipes created:");
-    println!(
-        " Parent->Child: read_fd={}, write_fd={}",
-        parent_to_child.0.as_raw_fd(),
-        parent_to_child.1.as_raw_fd()
-    );
-    println!(
-        " Child->Parent: read_fd={}, write_fd={}",
-        child_to_parent.0.as_raw_fd(),
-        child_to_parent.1.as_raw_fd()
-    );
+struct ContainerPipes {}
 
-    println!("Bento.rs Rootless Container Runtime");
-    println!("Parent PID: {} (running as unprivileged user)", getpid());
+impl ContainerPipes {
+    fn create() -> Result<(OrchestratorPipes, BridgePipes)> {
+        let orchestrator_to_bridge =
+            pipe().map_err(|e| anyhow!("Failed to create orchestrator->bridge pipe: {}", e))?;
+        let bridge_to_orchestrator =
+            pipe().map_err(|e| anyhow!("Failed to create bridge->orchestrator pipe: {}", e))?;
 
-    // Clone FDs for proper ownership distribution
-    let parent_write_fd = parent_to_child
-        .1
-        .try_clone()
-        .map_err(|e| anyhow!("Failed to clone parent write FD: {}", e))?;
-    let parent_read_fd = child_to_parent
-        .0
-        .try_clone()
-        .map_err(|e| anyhow!("Failed to clone parent read FD: {}", e))?;
-    let child_read_fd = parent_to_child
-        .0
-        .try_clone()
-        .map_err(|e| anyhow!("Failed to clone child read FD: {}", e))?;
-    let child_write_fd = child_to_parent
-        .1
-        .try_clone()
-        .map_err(|e| anyhow!("Failed to clone child write FD: {}", e))?;
+        println!("[Sync] Pipes created:");
+        println!(
+            " Orchestrator->Bridge: read_fd={}, write_fd={}",
+            orchestrator_to_bridge.0.as_raw_fd(),
+            orchestrator_to_bridge.1.as_raw_fd()
+        );
+        println!(
+            " Bridge->Orchestrator: read_fd={}, write_fd={}",
+            bridge_to_orchestrator.0.as_raw_fd(),
+            bridge_to_orchestrator.1.as_raw_fd()
+        );
 
-    // Cleaner functions
-    let parent_sync_handler = move |child_pid| -> Result<()> {
-        handle_namespace_synchronization(
-            child_pid,
-            parent_read_fd,
-            parent_write_fd,
-            parent_to_child.0,
-            child_to_parent.1,
-        )
-    };
+        let orchestrator_pipes = OrchestratorPipes {
+            read_fd: bridge_to_orchestrator.0,
+            write_fd: orchestrator_to_bridge.1,
+        };
 
-    let container_bootstrap = move || -> isize {
-        execute_container_initialization(
-            config,
-            child_read_fd,
-            child_write_fd,
-            parent_to_child.1,
-            child_to_parent.0,
-        )
-    };
+        let bridge_pipes = BridgePipes {
+            read_fd: orchestrator_to_bridge.0,
+            write_fd: bridge_to_orchestrator.1,
+        };
 
-    fork_intermediate(parent_sync_handler, container_bootstrap)?;
+        Ok((orchestrator_pipes, bridge_pipes))
+    }
+}
+
+struct OrchestratorPipes {
+    read_fd: OwnedFd,
+    write_fd: OwnedFd,
+}
+
+struct BridgePipes {
+    read_fd: OwnedFd,
+    write_fd: OwnedFd,
+}
+
+// Common pipe operations (reduces repetition)
+fn pipe_signal(fd: &OwnedFd, signal: SyncSignal, context: &str) -> Result<()> {
+    write(fd, &[signal.as_byte()])
+        .map_err(|e| anyhow!("Failed to send {} signal: {}", context, e))?;
+    println!("[{}] Sent '{}' signal", context, signal.as_char());
     Ok(())
 }
 
-// Main process function
-fn handle_namespace_synchronization(
-    child_pid: Pid,
-    read_fd: OwnedFd,
-    write_fd: OwnedFd,
-    unused_parent_read: OwnedFd,
-    unused_child_write: OwnedFd,
-) -> Result<()> {
-    println!("[Parent] Child spawned with PID: {child_pid}");
-
-    // Close unused pipe ends in parent
-    drop(unused_parent_read); // Don't need to read from parent->child
-    drop(unused_child_write); // Don't need to write to child->parent
-
-    // Wait for child namespace ready signal
-    println!("[Parent] Waiting for child namespace ready signal...");
+fn pipe_wait(fd: &OwnedFd, expected: SyncSignal, context: &str) -> Result<()> {
     let mut buf = [0u8; 1];
-    read(read_fd, &mut buf)
-        .map_err(|e| anyhow!("Failed to receive namespace ready signal: {}", e))?;
+    read(fd, &mut buf).map_err(|e| anyhow!("Failed to receive {} signal: {}", context, e))?;
 
-    if buf[0] != b'R' {
+    let received = SyncSignal::from_byte(buf[0])?;
+
+    if received != expected {
         return Err(anyhow!(
-            "Invalid namespace ready signal received: {}",
-            buf[0]
+            "Expected '{}', got '{}' in {}",
+            expected.as_char(),
+            received.as_char(),
+            context
         ));
     }
 
-    println!("[Parent] Received namespace ready signal from child");
-
-    // Perform UID/GID mapping
-    map_user_namespace_rootless(child_pid)?;
-    println!("[Parent] UID/GID mapping completed successfully");
-
-    // Signal mapping complete
-    write(write_fd, b"M").map_err(|e| anyhow!("Failed to signal mapping complete: {}", e))?;
-    println!("[Parent] Signaled mapping completion to child");
-
+    println!("[{}] Received '{}' signal", context, received.as_char());
     Ok(())
 }
 
-// Intermediate function
-fn execute_container_initialization(
-    _config: &Config,
-    read_fd: OwnedFd,
-    write_fd: OwnedFd,
-    unused_parent_write: OwnedFd,
-    unused_child_read: OwnedFd,
-) -> isize {
+// ============================================================================
+// MAIN CONTAINER CREATION
+// ============================================================================
+
+pub fn create_container(config: &Config) -> Result<()> {
+    let (orchestrator_pipes, bridge_pipes) = ContainerPipes::create()?;
+
+    println!("Bento.rs Rootless Container Runtime");
     println!(
-        "[Child] Container initialization started, PID: {}",
+        "Orchestrator PID: {} (running as unprivileged user)",
         getpid()
     );
 
-    // Close unused pipe ends in child
-    drop(unused_parent_write); // Don't need to write to parent->child
-    drop(unused_child_read); // Don't need to read from child->parent
+    // ✅ Clean closures calling purpose-driven functions
+    let orchestrator_logic = |bridge_pid| orchestrator_handler(bridge_pid, orchestrator_pipes);
+    let bridge_logic = || bridge_handler(config, bridge_pipes);
 
-    // Phase 1: Create user namespace
-    if unshare_user_namespace().is_err() {
-        eprintln!("[Child] Failed to create user namespace");
+    fork_intermediate(orchestrator_logic, bridge_logic)?;
+    Ok(())
+}
+
+// ============================================================================
+// ORCHESTRATOR PROCESS LOGIC (Container Creation Coordinator)
+// ============================================================================
+
+fn orchestrator_handler(bridge_pid: Pid, pipes: OrchestratorPipes) -> Result<()> {
+    println!("[Orchestrator] Bridge spawned with PID: {bridge_pid}");
+
+    // Wait for bridge namespace ready signal
+    println!("[Orchestrator] Waiting for bridge namespace ready signal...");
+    pipe_wait(&pipes.read_fd, SyncSignal::Ready, "Orchestrator")?;
+
+    // Perform UID/GID mapping
+    map_user_namespace_rootless(bridge_pid)?;
+    println!("[Orchestrator] UID/GID mapping completed successfully");
+
+    // Signal mapping complete
+    pipe_signal(&pipes.write_fd, SyncSignal::Mapped, "Orchestrator")?;
+
+    // Receive init process PID
+    println!("[Orchestrator] Waiting for final container PID...");
+    let mut pid_buf = [0u8; 4];
+    read(&pipes.read_fd, &mut pid_buf).map_err(|e| anyhow!("Failed to receive init PID: {}", e))?;
+    let final_container_pid = i32::from_le_bytes(pid_buf);
+    println!("[Orchestrator] Final container PID: {final_container_pid}");
+
+    // TODO: State management
+    //todo!("Create container state directory and save state.json with PID");
+    // Commented cuz it's panicking
+    Ok(())
+}
+
+// ============================================================================
+// BRIDGE PROCESS LOGIC (Namespace Builder)
+// ============================================================================
+
+fn bridge_handler(config: &Config, pipes: BridgePipes) -> isize {
+    println!(
+        "[Bridge] Container initialization started, PID: {}",
+        getpid()
+    );
+
+    // Phase 1: User namespace setup
+    if let Err(e) = setup_user_namespace(&pipes) {
+        eprintln!("[Bridge] User namespace setup failed: {e}");
         return 1;
     }
 
-    // Disable setgroups for safe mapping
-    if disable_setgroups_for_child().is_err() {
-        eprintln!("[Child] Failed to disable setgroups");
+    // Phase 2: Wait for UID/GID mapping
+    if let Err(e) = wait_for_mapping(&pipes) {
+        eprintln!("[Bridge] Mapping synchronization failed: {e}");
         return 1;
     }
 
-    // Signal parent that namespace is ready
-    println!("[Child] Signaling namespace ready to parent");
-    if write(write_fd, b"R").is_err() {
-        eprintln!("[Child] Failed to signal namespace ready");
+    // Phase 3: Create remaining namespaces
+    if let Err(e) = create_remaining_namespaces() {
+        eprintln!("[Bridge] Remaining namespaces creation failed: {e}");
         return 1;
     }
 
-    // Wait for mapping completion
-    println!("[Child] Waiting for mapping complete signal...");
-    let mut buf = [0u8; 1];
-    if read(read_fd, &mut buf).is_err() {
-        eprintln!("[Child] Failed to read mapping complete signal");
-        return 1;
-    }
+    // Phase 4: Create init process and communicate PID
+    create_init_with_pid_communication(config, &pipes)
+}
 
-    if buf[0] != b'M' {
-        eprintln!("[Child] Invalid mapping complete signal received");
-        return 1;
-    }
+// Helper functions for bridge phases
+fn setup_user_namespace(pipes: &BridgePipes) -> Result<()> {
+    unshare_user_namespace()?;
+    disable_setgroups_for_child()?;
+    pipe_signal(&pipes.write_fd, SyncSignal::Ready, "Bridge")?;
+    Ok(())
+}
 
-    println!("[Child] Received mapping complete signal");
+fn wait_for_mapping(pipes: &BridgePipes) -> Result<()> {
+    println!("[Bridge] Waiting for mapping complete signal...");
+    pipe_wait(&pipes.read_fd, SyncSignal::Mapped, "Bridge")?;
+    Ok(())
+}
 
-    // Phase 2: Create remaining namespaces
-    if unshare_remaining_namespaces().is_err() {
-        eprintln!("[Child] Failed to create remaining namespaces");
-        return 1;
-    }
+fn create_remaining_namespaces() -> Result<()> {
+    unshare_remaining_namespaces()
+        .map_err(|e| anyhow!("Failed to create remaining namespaces: {}", e))
+}
 
-    // Phase 3: Execute target command
-    /*println!("[Child] Executing command: {:?}", config.args);
-    let command = CString::new(config.args[0].as_str()).unwrap();
-    let args: Vec<CString> = config.args.iter()
-        .map(|s| CString::new(s.as_str()).unwrap())
-        .collect();
+fn create_init_with_pid_communication(config: &Config, pipes: &BridgePipes) -> isize {
+    println!("[Bridge] Creating init process...");
 
-    match execvp(&command, &args) {
-        Ok(_) => 0,
+    match unsafe { fork() } {
+        Ok(ForkResult::Parent {
+            child: init_process,
+        }) => {
+            println!("[Bridge] Created init PID: {init_process}");
+
+            // Send init process PID to orchestrator
+            let pid_bytes = init_process.as_raw().to_le_bytes();
+            if let Err(e) = write(&pipes.write_fd, &pid_bytes) {
+                eprintln!("[Bridge] Failed to send init PID: {e}");
+                return 1;
+            }
+            println!("[Bridge] Sent init PID to orchestrator");
+            println!("[Bridge] Mission complete - exiting");
+            0
+        }
+        Ok(ForkResult::Child) => init_handler(config),
         Err(e) => {
-            eprintln!("[Child] execvp failed: {}", e);
+            eprintln!("[Bridge] Failed to fork init process: {e}");
             1
         }
-    }*/
-    println!("[Child] Exiting create process - container is created but not started");
-    0
+    }
+}
+
+// ============================================================================
+// INIT PROCESS LOGIC (Container Init - PID 1)
+// ============================================================================
+
+fn init_handler(_config: &Config) -> isize {
+    println!("[Init] I am PID 1 in container: {}", getpid());
+
+    // Temporary: Keep current isolation test
+    println!("[Init] Testing namespace isolation...");
+    execute_isolation_test();
+
+    // TODO: Container environment setup
+    todo!("Implement pivot_root to container rootfs");
+    //todo!("Mount /proc, /sys, /dev filesystems");
+    //todo!("Set hostname from config");
+    //todo!("Setup environment variables");
+    //todo!("Apply security contexts");
+
+    // TODO: Start pipe mechanism
+    //todo!("Create start_pipe for pause/resume");
+    //todo!("Block on start_pipe until 'bento start'");
+
+    // TODO: Execute user command
+    //todo!("Execute config.args instead of test command");
+}
+
+fn execute_isolation_test() -> isize {
+    use nix::unistd::execvp;
+    use std::ffi::CString;
+
+    let args = vec![CString::new("/bin/id").unwrap()];
+
+    match execvp(&args[0], &args) {
+        Ok(_) => {
+            std::process::exit(0);
+        }
+        Err(e) => {
+            eprintln!("[Init] execvp failed: {e}");
+            std::process::exit(1);
+        }
+    }
 }
