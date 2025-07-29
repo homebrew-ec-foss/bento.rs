@@ -152,7 +152,7 @@ pub fn create_container(config: &Config) -> Result<()> {
     // ✅ Clean closures calling purpose-driven functions
     let orchestrator_logic = |bridge_pid| orchestrator_handler(bridge_pid, orchestrator_pipes);
     let bridge_logic = || bridge_handler(config, bridge_pipes);
-
+    
     fork_intermediate(orchestrator_logic, bridge_logic)?;
     Ok(())
 }
