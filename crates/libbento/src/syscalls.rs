@@ -82,7 +82,7 @@ pub fn clone_init(config: &Config, flags: CloneFlags) -> Result<()> {
 pub fn unshare_user_namespace() -> Result<()> {
     let flags = CloneFlags::CLONE_NEWUSER;
     unshare(flags).map_err(|e| anyhow!("Failed to unshare user namespace: {}", e))?;
-    println!("[Child] Created user namespace successfully");
+    println!("[Bridge] Created user namespace successfully");
     Ok(())
 }
 
@@ -91,7 +91,7 @@ pub fn unshare_user_namespace() -> Result<()> {
 pub fn unshare_remaining_namespaces() -> Result<()> {
     let flags = CloneFlags::CLONE_NEWPID | CloneFlags::CLONE_NEWUTS | CloneFlags::CLONE_NEWNS;
     unshare(flags).map_err(|e| anyhow!("Failed to unshare remaining namespaces: {}", e))?;
-    println!("[Child] Created remaining namespaces: {flags:?}");
+    println!("[Bridge] Created remaining namespaces: {flags:?}");
     Ok(())
 }
 
@@ -104,7 +104,7 @@ pub fn unshare_remaining_namespaces() -> Result<()> {
 pub fn disable_setgroups_for_child() -> Result<()> {
     fs::write("/proc/self/setgroups", "deny")
         .map_err(|e| anyhow!("Failed to disable setgroups: {}", e))?;
-    println!("[Child] Disabled setgroups for safe mapping");
+    println!("[Bridge] Disabled setgroups for safe mapping");
     Ok(())
 }
 
@@ -116,7 +116,7 @@ fn execute_mapping_helper(
     host_id: u32,
     count: u32,
 ) -> Result<()> {
-    println!("[Parent] Executing: {command} {child_pid} {container_id} {host_id} {count}");
+    println!("[Orchestrator] Executing: {command} {child_pid} {container_id} {host_id} {count}");
 
     let output = Command::new(command)
         .arg(child_pid.to_string())
@@ -158,7 +158,7 @@ fn execute_mapping_helper(
         ));
     }
 
-    println!("[Parent] {command} succeeded");
+    println!("[Orchestrator] {command} succeeded");
     Ok(())
 }
 
@@ -168,8 +168,8 @@ pub fn map_user_namespace_rootless(child_pid: Pid) -> Result<()> {
     let host_uid = getuid().as_raw();
     let host_gid = getgid().as_raw();
 
-    println!("[Parent] Starting rootless mapping for child {child_pid}");
-    println!("[Parent] Host UID: {host_uid}, Host GID: {host_gid}");
+    println!("[Orchestrator] Starting rootless mapping for child {child_pid}");
+    println!("[Orchestrator] Host UID: {host_uid}, Host GID: {host_gid}");
 
     // Map GID first (standard practice to avoid permission issues)
     // Format: newgidmap <pid> <container-gid> <host-gid> <count>
@@ -179,6 +179,6 @@ pub fn map_user_namespace_rootless(child_pid: Pid) -> Result<()> {
     // Format: newuidmap <pid> <container-uid> <host-uid> <count>
     execute_mapping_helper("newuidmap", child_pid, 0, host_uid, 1)?;
 
-    println!("[Parent] Rootless mapping complete: host user -> container root");
+    println!("[Orchestrator] Rootless mapping complete: host user -> container root");
     Ok(())
 }
