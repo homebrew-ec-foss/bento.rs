@@ -1,5 +1,8 @@
 use clap::{Parser, Subcommand, ValueHint};
-use libbento::process::{Config, create_container};
+use libbento::{
+    binary_checker::BinaryChecker,
+    process::{Config, create_container},
+};
 use log::info;
 use std::path::PathBuf;
 
@@ -37,6 +40,23 @@ pub enum Commands {
         #[arg(required = true)]
         container_id: String,
     },
+
+    #[command(name = "net-setup")]
+    NetSetup {
+        #[arg(long, value_parser = ["pasta", "slirp4netns"])]
+        driver: String,
+
+        #[arg(
+            long,
+            help = "Port mappings: HOST:CONTAINER[/PROTOCOL] (comma-separated). If no protocol is specified, tcp is assumed."
+        )]
+        ports: Option<String>,
+
+        /// Command to execute in networked container
+        command: Vec<String>,
+    },
+    #[command(name = "check-system")]
+    CheckSystem,
 }
 
 fn main() {
@@ -81,8 +101,21 @@ fn main() {
             todo!("Send termination signal to container process");
         }
         Commands::Delete { container_id } => {
-            println!("Deleting container '{container_id}'");
+            println!("Deleting container '{}'", container_id);
             todo!("Clean up container state and resources");
+        }
+        Commands::NetSetup {
+            driver,
+            ports,
+            command,
+        } => {
+            println!("Setting up network for container with driver '{}'", driver);
+            todo!("Setup network for container");
+        }
+        Commands::CheckSystem => {
+            if let Err(e) = BinaryChecker::check_system() {
+                eprintln!("System check failed: {e}");
+            }
         }
     }
 }
