@@ -1,10 +1,12 @@
 // crates/libbento/src/process.rs
 
+
+use crate::fs;
 use crate::syscalls::{
     disable_setgroups_for_child, fork_intermediate, map_user_namespace_rootless,
     unshare_remaining_namespaces, unshare_user_namespace,
 };
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, Context};
 use nix::unistd::Pid;
 use nix::unistd::{ForkResult, fork, getpid, pipe, read, write};
 use std::os::unix::io::{AsRawFd, OwnedFd};
@@ -149,7 +151,7 @@ pub fn create_container(config: &Config) -> Result<()> {
         getpid()
     );
 
-    // ✅ Clean closures calling purpose-driven functions
+    // Clean closures calling purpose-driven functions
     let orchestrator_logic = |bridge_pid| orchestrator_handler(bridge_pid, orchestrator_pipes);
     let bridge_logic = || bridge_handler(config, bridge_pipes);
     
@@ -270,16 +272,30 @@ fn create_init_with_pid_communication(config: &Config, pipes: &BridgePipes) -> i
 // INIT PROCESS LOGIC (Container Init - PID 1)
 // ============================================================================
 
-fn init_handler(_config: &Config) -> isize {
+fn init_handler(config: &Config) -> isize {
     println!("[Init] I am PID 1 in container: {}", getpid());
+    
+    if let Err(e) = debug_namespace_info() {
+        eprintln!("[Init] Failed to debug namespace info: {}", e);
+    }
+
+    // TODO: Container environment setup
+    //todo!("Implement pivot_root to container rootfs");
+    //todo!("Mount /proc, /sys, /dev filesystems");
+
+    // Phase 1: Filesystem preparation 
+    match fs::prepare_rootfs(&config.container_id) {
+        Ok(_) => println!("[Init] Filesystem prepared successfully"),
+        Err(e) => {
+            eprintln!("[Init] Filesystem preparation failed: {}", e);
+            return 1;
+        }
+    }
 
     // Temporary: Keep current isolation test
     println!("[Init] Testing namespace isolation...");
-    execute_isolation_test();
+    execute_isolation_test()
 
-    // TODO: Container environment setup
-    todo!("Implement pivot_root to container rootfs");
-    //todo!("Mount /proc, /sys, /dev filesystems");
     //todo!("Set hostname from config");
     //todo!("Setup environment variables");
     //todo!("Apply security contexts");
@@ -291,6 +307,41 @@ fn init_handler(_config: &Config) -> isize {
     // TODO: Execute user command
     //todo!("Execute config.args instead of test command");
 }
+
+fn debug_namespace_info() -> Result<()> {
+    use std::fs;
+    
+    println!("[Debug] Current process namespace information:");
+    
+    // Check PID namespace
+    let pid_ns = fs::read_link("/proc/self/ns/pid")
+        .context("Failed to read PID namespace")?;
+    println!("[Debug] PID namespace: {:?}", pid_ns);
+    
+    // Check mount namespace  
+    let mnt_ns = fs::read_link("/proc/self/ns/mnt")
+        .context("Failed to read mount namespace")?;
+    println!("[Debug] Mount namespace: {:?}", mnt_ns);
+    
+    // Check user namespace
+    let user_ns = fs::read_link("/proc/self/ns/user")
+        .context("Failed to read user namespace")?;
+    println!("[Debug] User namespace: {:?}", user_ns);
+    
+    // Check UTS namespace (hostname)
+    let uts_ns = fs::read_link("/proc/self/ns/uts")
+        .context("Failed to read UTS namespace")?;
+    println!("[Debug] UTS namespace: {:?}", uts_ns);
+    
+    // Check current PID as seen by process
+    println!("[Debug] Current PID (should be 1 in container): {}", nix::unistd::getpid());
+    
+    // Check parent PID
+    println!("[Debug] Parent PID: {}", nix::unistd::getppid());
+    
+    Ok(())
+}
+
 
 fn execute_isolation_test() -> isize {
     use nix::unistd::execvp;
