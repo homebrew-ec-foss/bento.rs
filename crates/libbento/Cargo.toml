@@ -4,7 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-nix         = { version = "0.27", features = ["user"]}
+anyhow = "1.0.98"
+nix         = { version = "0.27", features = ["user", "mount", "fs"]}
 
 [dev-dependencies]
 tempfile = "3.0"

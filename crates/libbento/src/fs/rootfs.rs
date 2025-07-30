@@ -1,9 +1,19 @@
 use anyhow::{Context, Result};
-use nix::{unistd, Error,sys::stat::{mknod, Mode, SFlag, sys}, mount::{statvfs, mount, umount, umount2, MsFlags, MntFlags}};
-use std::{fs, ffi::CString, path::{Path, PathBuf}, io};
 
-fn get_rootfs(container_id : &str) -> Result<(PathBuf,PathBuf)>{
-    let rootfs = PathBuf::from(format!("/var/lib/container/{}/rootfs", container_id));
+use nix::{
+    unistd, 
+    Error,
+    sys::stat::{mknod, Mode, SFlag, sys}, 
+    mount::{statvfs, mount, umount, umount2, MsFlags, MntFlags}};
+
+use std::{
+    fs,
+    ffi::CString,
+    path::{Path, PathBuf},
+    io};
+
+fn get_rootfs(container_id : &str, user_id : &str) -> Result<(PathBuf,PathBuf)>{
+    let rootfs = PathBuf::from(format!("/run/user/{}/container/{}/rootfs", user_id, container_id));
 
     fs::create_dir_all(&rootfs)
         .context("Failed to create the rootfs directory.")?;
@@ -34,13 +44,13 @@ fn is_bind_mount(path: &str) -> Result<bool> {
 // This func creates the rootfs dir - call this function from the container creation process with
 // container_id as argument.
 
-fn prepare_rootfs(container_id: &str) -> Result<PathBuf> {
+fn prepare_rootfs(container_id: &str, user_id : &str) -> Result<PathBuf> {
     
     if container_id.contains("..") || container_id.contains('/') {
         return Err(anyhow::anyhow!("Invalid container_id: {}", container_id));
     }   
     
-    let (rootfs,old_root) = get_rootfs(container_id);
+    let (rootfs,old_root) = get_rootfs(container_id, user_id);
     
     // Make the rootfs path a bind mount to itself
     mount(
