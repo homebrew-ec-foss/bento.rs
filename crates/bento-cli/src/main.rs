@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand, ValueHint};
 use libbento::{
     binary_checker::BinaryChecker,
+    networking::{NetworkConfig, parse_port_mappings, setup_network},
     process::{Config, create_container},
 };
 use log::info;
@@ -43,16 +44,12 @@ pub enum Commands {
 
     #[command(name = "net-setup")]
     NetSetup {
-        #[arg(long, value_parser = ["pasta", "slirp4netns"])]
-        driver: String,
-
         #[arg(
             long,
             help = "Port mappings: HOST:CONTAINER[/PROTOCOL] (comma-separated). If no protocol is specified, tcp is assumed."
         )]
         ports: Option<String>,
 
-        /// Command to execute in networked container
         command: Vec<String>,
     },
     #[command(name = "check-system")]
@@ -104,13 +101,23 @@ fn main() {
             println!("Deleting container '{}'", container_id);
             todo!("Clean up container state and resources");
         }
-        Commands::NetSetup {
-            driver,
-            ports,
-            command,
-        } => {
-            println!("Setting up network for container with driver '{}'", driver);
-            todo!("Setup network for container");
+        Commands::NetSetup { ports, command } => {
+            if command.is_empty() {
+                eprintln!("❌ Error: Command is required");
+                eprintln!("Example: bento net-setup --ports 8080:80 python3 -m http.server 80");
+                std::process::exit(1);
+            }
+
+            let mut config = NetworkConfig::new(command);
+
+            if let Some(ports_str) = ports {
+                let mappings = parse_port_mappings(&ports_str);
+                config = config.with_ports(mappings);
+            }
+
+            if let Err(e) = setup_network(&config) {
+                eprintln!("Network setup failed: {e}");
+            }
         }
         Commands::CheckSystem => {
             if let Err(e) = BinaryChecker::check_system() {

@@ -7,3 +7,4 @@ edition = "2024"
 nix = { version = "0.30.1", features = ["sched", "process", "hostname", "user"] }
 libc = "0.2.174"
 anyhow = "1.0.98"
+clap = { version = "4.5.4", features = ["derive"] }
