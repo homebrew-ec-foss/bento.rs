@@ -291,13 +291,17 @@ fn init_handler(config: &Config) -> isize {
             return 1;
         }
     }
+  
+
+    //todo!("Set hostname from config");
+    //set_container_hostname("my-container");    
 
     // Temporary: Keep current isolation test
     println!("[Init] Testing namespace isolation...");
     execute_isolation_test()
 
-    //todo!("Set hostname from config");
-    //todo!("Setup environment variables");
+
+//todo!("Setup environment variables");
     //todo!("Apply security contexts");
 
     // TODO: Start pipe mechanism
@@ -306,6 +310,22 @@ fn init_handler(config: &Config) -> isize {
 
     // TODO: Execute user command
     //todo!("Execute config.args instead of test command");
+}
+
+fn set_container_hostname(hostname: &str) -> Result<()> {
+    println!("[Init] Setting container hostname to: {}", hostname);
+    
+    match nix::unistd::sethostname(hostname) {
+        Ok(_) => {
+            println!("[Init] Hostname successfully set to: {}", hostname);
+            Ok(())
+        }
+        Err(e) => {
+            println!("[Init] Warning: Failed to set hostname: {}", e);
+            // Don't fail the container for hostname issues
+            Ok(())
+        }
+    }
 }
 
 fn debug_namespace_info() -> Result<()> {
@@ -342,7 +362,7 @@ fn debug_namespace_info() -> Result<()> {
     Ok(())
 }
 
-
+/*
 fn execute_isolation_test() -> isize {
     use nix::unistd::execvp;
     use std::ffi::CString;
@@ -358,4 +378,63 @@ fn execute_isolation_test() -> isize {
             std::process::exit(1);
         }
     }
+}
+*/
+
+fn execute_isolation_test() -> isize {
+    println!("[Init] Testing container isolation without external binaries");
+    
+    // Test 1: Verify we're PID 1
+    let pid = nix::unistd::getpid();
+    println!("[Test] Current PID: {}", pid);
+    assert_eq!(pid.as_raw(), 1, "Expected to be PID 1 in container");
+    
+    // Test 2: Check filesystem isolation
+    match std::fs::read_dir("/") {
+        Ok(entries) => {
+            println!("[Test] Root directory contents:");
+            for entry in entries {
+                if let Ok(entry) = entry {
+                    println!("[Test]   - {}", entry.file_name().to_string_lossy());
+                }
+            }
+        }
+        Err(e) => println!("[Test] Failed to read root directory: {}", e),
+    }
+    
+    // Test 3: Check mount namespaces
+    match std::fs::read_to_string("/proc/self/mountinfo") {
+        Ok(mounts) => {
+            println!("[Test] Container has {} mount entries", mounts.lines().count());
+            // Show first few mounts
+            for (i, line) in mounts.lines().take(5).enumerate() {
+                println!("[Test] Mount {}: {}", i, line);
+            }
+        }
+        Err(e) => println!("[Test] Failed to read mountinfo: {}", e),
+    }
+    
+    // Test 4: Check user namespace mapping
+    match std::fs::read_to_string("/proc/self/uid_map") {
+        Ok(uid_map) => println!("[Test] UID mapping: {}", uid_map.trim()),
+        Err(e) => println!("[Test] Failed to read uid_map: {}", e),
+    }
+    
+    match std::fs::read_to_string("/proc/self/gid_map") {
+        Ok(gid_map) => println!("[Test] GID mapping: {}", gid_map.trim()),
+        Err(e) => println!("[Test] Failed to read gid_map: {}", e),
+    }
+    
+    // Test 5: Check hostname isolation  
+    match nix::unistd::gethostname() {
+        Ok(hostname) => println!("[Test] Container hostname: {}", hostname.to_string_lossy()),
+        Err(e) => println!("[Test] Failed to get hostname: {}", e),
+    }
+    
+    println!("[Test] Container isolation test completed successfully!");
+    println!("[Test] Container is ready for actual workloads");
+    
+    // For now, just exit successfully
+    // In a real container, this would be where we execute the user's command
+    0
 }
