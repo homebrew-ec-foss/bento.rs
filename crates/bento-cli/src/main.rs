@@ -1,7 +1,8 @@
 use clap::{Parser, Subcommand, ValueHint};
-use libbento::process::{Config, create_container};
+use libbento::process::{Config, create_container, start_container};
 use log::info;
 use std::path::PathBuf;
+use std::os::unix::io::FromRawFd;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -58,18 +59,31 @@ fn main() {
                 bundle.display()
             );
 
-            let config = Config::default(); // TODO: Load from bundle/config.json
-
-            if let Err(e) = create_container(&config) {
-                eprintln!("Container creation failed: {e}");
+            let mut config = Config::default(); // TODO: Load from bundle/config.json
+	    config.container_id = container_id.clone();
+	    config.bundle_path = bundle.to_string_lossy().to_string();
+            match create_container(&config) {
+	        Ok(_) => println!("Container '{}' created successfully", container_id),
+        	Err(e) => {
+            	eprintln!("Container creation failed: {e}");
+            	std::process::exit(1);
             }
-        }
+    }
+
+	}
         Commands::Start { container_id } => {
             println!("Starting container '{container_id}'");
-            todo!("Generate OCI spec template");
+        	match start_container(&container_id) {
+	        	Ok(_) => println!("Container '{}' started successfully", container_id),
+        		Err(e) => {
+            			eprintln!("Failed to start container '{}': {}", container_id, e);
+            			std::process::exit(1);
+        		}
+    		}
         }
         Commands::State { container_id } => {
             println!("State of container '{container_id}'");
+            
             todo!("Load and display container status from state file");
         }
         Commands::List {} => {
