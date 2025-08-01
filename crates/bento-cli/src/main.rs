@@ -104,7 +104,7 @@ fn main() {
         Commands::NetSetup { ports, command } => {
             if command.is_empty() {
                 eprintln!("❌ Error: Command is required");
-                eprintln!("Example: bento net-setup --ports 8080:80 python3 -m http.server 80");
+                eprintln!("Example: bento net-setup --ports 8080:80 python3 -m http.server 8000");
                 std::process::exit(1);
             }
 
