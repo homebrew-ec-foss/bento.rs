@@ -98,7 +98,7 @@ fn main() {
             todo!("Send termination signal to container process");
         }
         Commands::Delete { container_id } => {
-            println!("Deleting container '{}'", container_id);
+            println!("Deleting container '{container_id}'");
             todo!("Clean up container state and resources");
         }
         Commands::NetSetup { ports, command } => {

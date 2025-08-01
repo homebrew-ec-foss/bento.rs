@@ -49,7 +49,7 @@ pub fn setup_network(config: &NetworkConfig) -> Result<()> {
     }
 
     let mut cmd = Command::new("unshare");
-    cmd.args(&["--net", "--fork"]);
+    cmd.args(["--net", "--fork"]);
     cmd.arg("sh").arg("-c");
 
     let mut setup_script = String::new();
@@ -88,7 +88,7 @@ pub fn setup_network(config: &NetworkConfig) -> Result<()> {
 }
 
 fn test_unshare_capability() -> bool {
-    let test_result = Command::new("unshare").args(&["--net", "true"]).output();
+    let test_result = Command::new("unshare").args(["--net", "true"]).output();
 
     match test_result {
         Ok(output) => output.status.success(),

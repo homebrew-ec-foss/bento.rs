@@ -49,7 +49,7 @@ impl BinaryChecker {
             ));
         }
 
-        println!("✅ User namespaces enabled (max: {})", max);
+        println!("✅ User namespaces enabled (max: {max})");
         println!("\n🎉 System ready for direct networking!");
 
         Ok(())
