@@ -1,15 +1,15 @@
 // crates/libbento/src/process.rs
 
-use libc;
-use std::os::unix::io::FromRawFd;
+use nix::sys::stat::Mode;
+use std::io::{Read, Write};
+//use std::os::unix::io::FromRawFd;
 use crate::fs;
 use crate::syscalls::{
     disable_setgroups_for_child, fork_intermediate, map_user_namespace_rootless,
     unshare_remaining_namespaces, unshare_user_namespace,
 };
 use anyhow::{Result, anyhow, Context};
-use nix::unistd::Pid;
-use nix::unistd::{ForkResult, fork, getpid, pipe, read, write};
+use nix::unistd::{Pid, ForkResult, fork, getpid, pipe, read, write, mkfifo};
 use std::os::unix::io::{AsRawFd, OwnedFd};
 
 use serde::{Serialize, Deserialize};
@@ -25,8 +25,9 @@ pub struct ContainerState {
     pub status: String,
     pub bundle_path: String,
     pub created_at: String,
-    pub start_pipe_fd: Option<i32>, // Store for bento start to reopen
+    pub start_pipe_path: Option<String>, // Store for bento start to reopen
 }
+
 
 impl ContainerState {
     fn new(id: String, pid: i32, bundle_path: String) -> Self {
@@ -42,7 +43,7 @@ impl ContainerState {
             status: "created".to_string(),
             bundle_path,
             created_at,
-            start_pipe_fd: None,
+            start_pipe_path: None, // Will be set when created
         }
     }
 }
@@ -243,12 +244,8 @@ pub fn create_container(config: &Config) -> Result<()> {
         getpid()
     );
 
-    // Store start_pipe FD for state.json
-    let start_pipe_write_fd = orchestrator_pipes.start_write_fd.as_raw_fd();
-
-
     // Clean closures calling purpose-driven functions
-    let orchestrator_logic = |bridge_pid| orchestrator_handler(bridge_pid, orchestrator_pipes, config, start_pipe_write_fd);
+    let orchestrator_logic = |bridge_pid| orchestrator_handler(bridge_pid, orchestrator_pipes, config);
     let bridge_logic = || bridge_handler(config, bridge_pipes);
     
     fork_intermediate(orchestrator_logic, bridge_logic)?;
@@ -259,7 +256,7 @@ pub fn create_container(config: &Config) -> Result<()> {
 // ORCHESTRATOR PROCESS LOGIC (Container Creation Coordinator)
 // ============================================================================
 
-fn orchestrator_handler(bridge_pid: Pid, pipes: OrchestratorPipes, config: &Config, start_pipe_fd: i32) -> Result<()> {
+fn orchestrator_handler(bridge_pid: Pid, pipes: OrchestratorPipes, config: &Config) -> Result<()> {
     println!("[Orchestrator] Bridge spawned with PID: {bridge_pid}");
 
     // Wait for bridge namespace ready signal
@@ -280,9 +277,21 @@ fn orchestrator_handler(bridge_pid: Pid, pipes: OrchestratorPipes, config: &Conf
     let final_container_pid = i32::from_le_bytes(pid_buf);
     println!("[Orchestrator] Final container PID: {final_container_pid}");
 
-    // TODO: State management
-    //todo!("Create container state directory and save state.json with PID");
-    // Commented cuz it's panicking
+    // State management
+    let home = std::env::var("HOME")
+        .context("HOME environment variable not set")?;
+    let container_rootfs = format!("{}/.local/share/bento/{}/rootfs", home, config.container_id);
+    let start_pipe_path = format!("{}/tmp/bento-start-{}", container_rootfs, config.container_id);
+    
+    // Ensure tmp directory exists in container rootfs
+    std_fs::create_dir_all(format!("{}/tmp", container_rootfs))?;
+    
+    // Create FIFO in container's filesystem
+    if let Err(e) = mkfifo(start_pipe_path.as_str(), Mode::S_IRUSR | Mode::S_IWUSR) {
+        return Err(anyhow!("Failed to create start pipe: {}", e));
+    }
+    
+    println!("[Orchestrator] Created start pipe in container rootfs: {}", start_pipe_path);
 
     // Create and save state.json
     let mut container_state = ContainerState::new(
@@ -291,11 +300,12 @@ fn orchestrator_handler(bridge_pid: Pid, pipes: OrchestratorPipes, config: &Conf
         config.bundle_path.clone()
     );
 
-    // Store the start pipe FD 
-    container_state.start_pipe_fd = Some(start_pipe_fd);
+    // Store the container-relative path (what init will see after pivot_root)
+    container_state.start_pipe_path = Some(format!("/tmp/bento-start-{}", config.container_id));
     
     save_container_state(&config.container_id, &container_state)
         .context("Failed to save container state")?;
+
 
     // NEW: Wait for bridge to exit (proper daemonless cleanup)
     println!("[Orchestrator] Waiting for bridge process to exit...");
@@ -466,7 +476,7 @@ fn init_handler(config: &Config) -> isize {
     }    
 */
 
-fn init_handler_with_pause(config: &Config, start_pipe_fd: i32) -> isize {
+fn init_handler_with_pause(config: &Config, _start_pipe_fd: i32) -> isize {
     println!("[Init] I am PID 1 in container: {}", getpid());
     
     if let Err(e) = debug_namespace_info() {
@@ -489,28 +499,35 @@ fn init_handler_with_pause(config: &Config, start_pipe_fd: i32) -> isize {
     }
 
     // Phase 3: Enter PAUSE state - BLOCK HERE until bento start
+    let start_pipe_path = format!("/tmp/bento-start-{}", config.container_id);
     println!("[Init] Container setup complete - entering PAUSE state");
-    println!("[Init] Waiting for 'bento start' command...");
+    println!("[Init] Waiting for signal at: {}", start_pipe_path);
+// Open named pipe for reading (this blocks until writer opens)
+    use std::fs::OpenOptions;
+    use std::io::Read;
     
-    let mut start_buffer = [0u8; 1];
-    match unsafe { libc::read(start_pipe_fd, start_buffer.as_mut_ptr() as *mut libc::c_void, 1) } {
-        -1 => {
-            eprintln!("[Init] Failed to read from start pipe");
-            return 1;
+    match std_fs::OpenOptions::new().read(true).open(&start_pipe_path) {
+        Ok(mut pipe) => {
+            let mut buffer = [0u8; 1];
+            match pipe.read(&mut buffer) {
+                Ok(_) => {
+                    println!("[Init] Received start signal - proceeding to exec");
+                }
+                Err(e) => {
+                    eprintln!("[Init] Failed to read from start pipe: {}", e);
+                    return 1;
+                }
+            }
         }
-        0 => {
-            eprintln!("[Init] Start pipe closed unexpectedly");
+        Err(e) => {
+            eprintln!("[Init] Failed to open start pipe: {}", e);
             return 1;
-        }
-        _ => {
-            println!("[Init] Received start signal - proceeding to exec");
         }
     }
 
     // Phase 4: Execute user command
     println!("[Init] Executing user command: {:?}", config.args);
     exec_user_command(config)
-
     // Temporary: Keep current isolation test
     //println!("[Init] Testing namespace isolation...");
     //execute_isolation_test()
@@ -690,7 +707,6 @@ fn exec_user_command(config: &Config) -> isize {
         }
     }
 }
-
 pub fn start_container(container_id: &str) -> Result<()> {
     let state = load_container_state(container_id)?;
     
@@ -702,20 +718,32 @@ pub fn start_container(container_id: &str) -> Result<()> {
     println!("[Start] Loading container '{}' (PID: {})", container_id, state.pid);
     
     // Check if process is still alive
-    use nix::sys::signal::{kill, Signal};
     if let Err(_) = kill(nix::unistd::Pid::from_raw(state.pid), Signal::SIGCONT) {
         return Err(anyhow!("Container process {} is no longer running", state.pid));
     }
     
-    // CRITICAL FIX: Actually write to the start_pipe instead of creating a file
-    if let Some(pipe_fd) = state.start_pipe_fd {
-        // Write a byte to unblock the init process
-        match unsafe { libc::write(pipe_fd, "s".as_ptr() as *const libc::c_void, 1) } {
-            1 => println!("[Start] Successfully signaled init process via pipe"),
-            _ => return Err(anyhow!("Failed to write to start pipe")),
+    // Convert container path to host path for writing
+    if let Some(ref container_pipe_path) = state.start_pipe_path {
+        let home = std::env::var("HOME")?;
+        let host_pipe_path = format!("{}/.local/share/bento/{}/rootfs{}", 
+                                   home, container_id, container_pipe_path);
+        
+        match std_fs::OpenOptions::new().write(true).open(&host_pipe_path) {
+            Ok(mut pipe) => {
+                use std::io::Write;
+                match pipe.write(b"start") {
+                    Ok(_) => {
+                        println!("[Start] Successfully signaled init process via named pipe");
+                        // Clean up the named pipe from host perspective
+                        let _ = std_fs::remove_file(&host_pipe_path);
+                    }
+                    Err(e) => return Err(anyhow!("Failed to write to start pipe: {}", e)),
+                }
+            }
+            Err(e) => return Err(anyhow!("Failed to open start pipe: {}", e)),
         }
     } else {
-        return Err(anyhow!("No start pipe FD found in container state"));
+        return Err(anyhow!("No start pipe path found in container state"));
     }
     
     // Update state to running

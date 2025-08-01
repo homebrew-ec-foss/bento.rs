@@ -1,4 +1,6 @@
 // crates/libbento/src/fs.rs
+
+use std::os::unix::fs::PermissionsExt;
 use anyhow::{Context, Result};
 use nix::{
     unistd,
@@ -47,6 +49,10 @@ pub fn prepare_rootfs(container_id: &str) -> Result<PathBuf> {
     let (rootfs, old_root) = get_rootfs(container_id)?;
     println!("[Init] Rootfs: {:?}, Old root: {:?}", rootfs, old_root);
 
+    //populating with binaries
+    populate_rootfs_binaries(&rootfs);
+
+
     // Phase 2: Bind mount rootfs to itself (required for pivot_root)
     mount(
         Some(&rootfs),
@@ -74,6 +80,71 @@ pub fn prepare_rootfs(container_id: &str) -> Result<PathBuf> {
     println!("[Init] Rootless container filesystem ready");
     Ok(PathBuf::from("/"))
 }
+
+fn populate_rootfs_binaries(rootfs: &Path) -> Result<()> {
+    let bin_dir = rootfs.join("bin");
+    let lib_dir = rootfs.join("lib");
+    let lib64_dir = rootfs.join("lib64");
+    
+    std::fs::create_dir_all(&bin_dir)?;
+    std::fs::create_dir_all(&lib_dir)?;
+    std::fs::create_dir_all(&lib64_dir)?;
+    
+    // Copy binaries
+    let essential_binaries = ["/bin/cat", "/bin/sh", "/bin/ls"];
+    for binary in &essential_binaries {
+        if Path::new(binary).exists() {
+            let dest = bin_dir.join(Path::new(binary).file_name().unwrap());
+            std::fs::copy(binary, &dest)?;
+            std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))?;
+        }
+    }
+    
+    // Copy dynamic linker
+    if Path::new("/lib64/ld-linux-x86-64.so.2").exists() {
+        std::fs::copy("/lib64/ld-linux-x86-64.so.2", lib64_dir.join("ld-linux-x86-64.so.2"))?;
+    }
+    
+    // Copy libc
+    if Path::new("/lib/x86_64-linux-gnu/libc.so.6").exists() {
+        let target_lib_dir = lib_dir.join("x86_64-linux-gnu");
+        std::fs::create_dir_all(&target_lib_dir)?;
+        std::fs::copy("/lib/x86_64-linux-gnu/libc.so.6", target_lib_dir.join("libc.so.6"))?;
+    }
+    
+    Ok(())
+}
+
+
+/*
+fn populate_rootfs_binaries(rootfs: &Path) -> Result<()> {
+    let bin_dir = rootfs.join("bin");
+    std::fs::create_dir_all(&bin_dir)?;
+    
+    // Copy essential binaries from host (minimal set for demo)
+    let essential_binaries = [
+        "/bin/cat",
+        "/bin/sh", 
+        "/bin/ls",
+    ];
+    
+    for binary in &essential_binaries {
+        if Path::new(binary).exists() {
+            let dest = bin_dir.join(Path::new(binary).file_name().unwrap());
+            std::fs::copy(binary, &dest)?;
+            // Make executable
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&dest)?.permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&dest, perms)?;
+            println!("[Rootfs] Copied binary: {:?}", dest);
+        }
+    }
+    
+    Ok(())
+}
+*/
+
 
 fn rootless_mount_proc(rootfs: &Path) -> Result<()> {
     let proc_path = rootfs.join("proc");
