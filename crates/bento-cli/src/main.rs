@@ -69,15 +69,15 @@ fn main() {
                 population_method
             );
 
-	    let config = Config {
-        	container_id: container_id.clone(),
-        	bundle_path: bundle.to_string_lossy().to_string(),
-        	population_method: match population_method.as_str() {
-            		"manual" => RootfsPopulationMethod::Manual,
-            		_ => RootfsPopulationMethod::BusyBox, // Clear default handling
-        	},
-        	..Config::default() // Use default for remaining fields
-    	    };
+            let config = Config {
+                container_id: container_id.clone(),
+                bundle_path: bundle.to_string_lossy().to_string(),
+                population_method: match population_method.as_str() {
+                    "manual" => RootfsPopulationMethod::Manual,
+                    _ => RootfsPopulationMethod::BusyBox, // Clear default handling
+                },
+                ..Config::default() // Use default for remaining fields
+            };
             match create_container(&config) {
                 Ok(_) => println!("Container '{container_id}' created successfully"),
                 Err(e) => {
@@ -102,7 +102,35 @@ fn main() {
         }
         Commands::List {} => {
             println!("Listing containers");
-            todo!("Enumerate all container state files");
+            match libbento::process::list_containers() {
+                Ok(containers) => {
+                    if containers.is_empty() {
+                        println!("No containers found");
+                    } else {
+                        // Display containers in a formatted table
+                        println!(
+                            "{:<20} {:<10} {:<15} {:<10} {:<30}",
+                            "CONTAINER ID", "STATUS", "PID", "RUNTIME", "BUNDLE"
+                        );
+                        println!("{}", "-".repeat(95));
+
+                        for container in containers {
+                            println!(
+                                "{:<20} {:<10} {:<15} {:<10} {:<30}",
+                                container.id,
+                                container.display_status(),
+                                container.pid,
+                                format!("{:?}", container.runtime_status).to_lowercase(),
+                                container.bundle_path
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Failed to list containers: {}", e);
+                    std::process::exit(1);
+                }
+            }
         }
         Commands::Kill { container_id } => {
             println!("Killing container '{container_id}'");

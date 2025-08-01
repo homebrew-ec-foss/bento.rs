@@ -8,12 +8,13 @@ use crate::syscalls::{
 use anyhow::{Context, Result, anyhow};
 use nix::sys::signal::{Signal, kill};
 use nix::sys::stat::Mode;
-use nix::sys::wait::waitpid;
+use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
 use nix::unistd::{ForkResult, Pid, fork, getpid, mkfifo, pipe, read, write};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs as std_fs;
 use std::os::unix::io::{AsRawFd, OwnedFd};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // NEW: Add the RootfsPopulationMethod enum
 #[derive(Debug, Clone)]
@@ -127,11 +128,36 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             root_path: "/tmp/bento-rootfs".to_string(),
+
+            //args: vec!["/bin/sh".to_string(), "-c".to_string(), "cat /proc/meminfo | head -5 && echo 'System info accessible'".to_string()],
+            //args: vec!["/bin/sh".to_string(), "-c".to_string(), "env | sort && echo 'PATH:' $PATH".to_string()],
+            //args: vec!["/bin/sh".to_string(), "-c".to_string(), "ls -la /bin | head -10 && echo 'Filesystem test complete'".to_string()],
             args: vec![
                 "/bin/sh".to_string(),
                 "-c".to_string(),
-                "/bin/ls /bin; /bin/echo 'PATH test'; echo $PATH".to_string(),
+                "ps aux && echo 'Process count:' $(ps aux | wc -l)".to_string(),
             ],
+            //args: vec!["/bin/sh".to_string(), "-c".to_string(), "uname -a && hostname && echo 'Working directory:' $(pwd)".to_string()],
+            /*
+            args: vec!["/bin/sh".to_string(), "-c".to_string(),
+                       "echo '=== CONTAINER SYSTEM REPORT ===' && echo 'User Information:' && whoami && id && echo 'System Information:' && hostname && uname -a && echo 'Available Commands:' && ls /bin | head -10 && echo '=== END REPORT ==='".to_string()],
+            //didnt work at all
+             */
+
+            /* args: vec!["/bin/sh".to_string(), "-c".to_string(),
+                       "echo '=== FILESYSTEM ANALYSIS ===' && echo 'Root directory:' && ls -la / && echo 'Proc filesystem:' && ls /proc | head -5 && echo 'Device filesystem:' && ls /dev | head -5 && echo 'Mount points:' && mount && echo '=== END ANALYSIS ==='".to_string()],
+            // worked tho
+            */
+
+
+                    //args: vec!["/bin/sh".to_string()],//executed and killed terminal
+                        //args: vec![ "/bin/whoami".to_string() ], //worked but gave wrong value
+                        //args: vec!["/bin/sh".to_string(),"-i".to_string()],
+                    /*args: vec![
+                            "/bin/sh".to_string(),
+                            "-c".to_string(),
+                            "/bin/ls /bin; /bin/echo 'PATH test'; echo $PATH".to_string(),
+                        ],*/
             hostname: "bento-container".to_string(),
             rootless: true,
             bundle_path: ".".to_string(),
@@ -214,6 +240,8 @@ fn pipe_wait(fd: &OwnedFd, expected: SyncSignal, context: &str) -> Result<()> {
 // ============================================================================
 
 pub fn create_container(config: &Config) -> Result<()> {
+    cleanup_named_pipes(&config.container_id).context("Failed to cleanup stale named pipes")?;
+
     let (orchestrator_pipes, bridge_pipes) = ContainerPipes::create()?;
     println!("Bento.rs Rootless Container Runtime");
     println!(
@@ -255,6 +283,8 @@ fn orchestrator_handler(bridge_pid: Pid, pipes: OrchestratorPipes, config: &Conf
     let final_container_pid = i32::from_le_bytes(pid_buf);
     println!("[Orchestrator] Final container PID: {final_container_pid}");
 
+    cleanup_named_pipes(&config.container_id).context("Failed to cleanup pipes before creation")?;
+
     // State management
     let home = std::env::var("HOME").context("HOME environment variable not set")?;
     let container_rootfs = format!("{}/.local/share/bento/{}/rootfs", home, config.container_id);
@@ -266,14 +296,19 @@ fn orchestrator_handler(bridge_pid: Pid, pipes: OrchestratorPipes, config: &Conf
     // Ensure tmp directory exists in container rootfs
     std_fs::create_dir_all(format!("{container_rootfs}/tmp"))?;
 
-    // Create FIFO in container's filesystem
-    if let Err(e) = mkfifo(start_pipe_path.as_str(), Mode::S_IRUSR | Mode::S_IWUSR) {
-        return Err(anyhow!("Failed to create start pipe: {}", e));
-    }
+    let _ = std::fs::remove_file(&start_pipe_path);
 
-    println!(
-        "[Orchestrator] Created start pipe in container rootfs: {start_pipe_path}"
-    );
+    // Create FIFO in container's filesystem
+    match mkfifo(start_pipe_path.as_str(), Mode::S_IRUSR | Mode::S_IWUSR) {
+        Ok(_) => println!("[Orchestrator] Created start pipe: {}", start_pipe_path),
+        Err(e) => {
+            eprintln!(
+                "[Orchestrator] Failed to create start pipe {}: {}",
+                start_pipe_path, e
+            );
+            // Continue anyway - the error will be caught later
+        }
+    }
 
     // Create and save state.json
     let mut container_state = ContainerState::new(
@@ -290,9 +325,53 @@ fn orchestrator_handler(bridge_pid: Pid, pipes: OrchestratorPipes, config: &Conf
 
     // NEW: Wait for bridge to exit (proper daemonless cleanup)
     println!("[Orchestrator] Waiting for bridge process to exit...");
-    match waitpid(bridge_pid, None) {
-        Ok(status) => println!("[Orchestrator] Bridge exited with status: {status:?}"),
-        Err(e) => println!("[Orchestrator] Warning: Failed to wait for bridge: {e}"),
+
+    // Use non-blocking wait first to check status
+    match waitpid(bridge_pid, Some(WaitPidFlag::WNOHANG)) {
+        Ok(WaitStatus::Exited(pid, status)) => {
+            println!(
+                "[Orchestrator] Bridge {} already exited with status {}",
+                pid, status
+            );
+        }
+        Ok(WaitStatus::StillAlive) => {
+            // Bridge still running, wait with timeout
+            println!("[Orchestrator] Bridge still running, waiting...");
+
+            // Try blocking wait
+            match waitpid(bridge_pid, None) {
+                Ok(WaitStatus::Exited(pid, status)) => {
+                    println!(
+                        "[Orchestrator] Bridge {} exited with status {}",
+                        pid, status
+                    );
+                }
+                Ok(WaitStatus::Signaled(pid, signal, _)) => {
+                    println!(
+                        "[Orchestrator] Bridge {} killed by signal {:?}",
+                        pid, signal
+                    );
+                }
+                Ok(status) => {
+                    println!("[Orchestrator] Bridge wait returned: {:?}", status);
+                }
+                Err(nix::errno::Errno::ECHILD) => {
+                    println!("[Orchestrator] Bridge already reaped (ECHILD) - this is normal");
+                }
+                Err(e) => {
+                    println!("[Orchestrator] Warning: Bridge wait error: {}", e);
+                }
+            }
+        }
+        Err(nix::errno::Errno::ECHILD) => {
+            println!("[Orchestrator] Bridge process already reaped (ECHILD)");
+        }
+        Err(e) => {
+            println!("[Orchestrator] Warning: Bridge check error: {}", e);
+        }
+        _ => {
+            println!("[Orchestrator] Bridge in unexpected state");
+        }
     }
 
     println!(
@@ -303,6 +382,7 @@ fn orchestrator_handler(bridge_pid: Pid, pipes: OrchestratorPipes, config: &Conf
         "[Orchestrator] Use 'bento start {}' to run the container",
         config.container_id
     );
+
     Ok(())
 }
 
@@ -396,6 +476,130 @@ fn create_init_with_start_pipe(config: &Config, pipes: &BridgePipes) -> isize {
 
 fn init_handler_with_pause(config: &Config, _start_pipe_fd: i32) -> isize {
     println!("[Init] I am PID 1 in container: {}", getpid());
+    println!("[Init] Container ID: {}", config.container_id);
+    println!("[Init] Command to execute: {:?}", config.args);
+
+    // Phase 1: Filesystem preparation with validation
+    match fs::prepare_rootfs(&config.container_id, config) {
+        Ok(_) => {
+            println!("[Init] Filesystem prepared successfully");
+
+            // Validate that commands exist after rootfs preparation
+            println!("[Init] Validating command availability:");
+            for (i, arg) in config.args.iter().enumerate() {
+                if i == 0 {
+                    // Only check the main command, not arguments
+                    if Path::new(arg).exists() {
+                        println!("[Init] ✓ Command {} exists and is accessible", arg);
+                    } else {
+                        println!("[Init] ✗ WARNING: Command {} does not exist!", arg);
+
+                        // List available commands for debugging
+                        println!("[Init] Available commands in /bin:");
+                        if let Ok(entries) = std::fs::read_dir("/bin") {
+                            for entry in entries.take(10) {
+                                if let Ok(entry) = entry {
+                                    println!("[Init]   - {}", entry.file_name().to_string_lossy());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("[Init] Filesystem preparation failed: {}", e);
+            return 1;
+        }
+    }
+
+    // Phase 2: Set hostname
+    if let Err(e) = set_container_hostname(&config.hostname) {
+        eprintln!("[Init] Failed to set hostname: {}", e);
+        return 1;
+    }
+
+    // Phase 3: Environment setup
+    if let Err(e) = setup_container_environment() {
+        eprintln!("[Init] Failed to setup environment: {}", e);
+        return 1;
+    }
+
+    // Phase 4: Enter PAUSE state
+    let start_pipe_path = format!("/tmp/bento-start-{}", config.container_id);
+    println!("[Init] Container setup complete - entering PAUSE state");
+    println!("[Init] Waiting for signal at: {}", start_pipe_path);
+    println!(
+        "[Init] Current working directory: {:?}",
+        std::env::current_dir()
+    );
+    println!("[Init] Current PATH: {:?}", std::env::var("PATH"));
+
+    // Read start signal with proper error handling
+    match read_start_signal(&start_pipe_path) {
+        Ok(_) => {
+            println!("[Init] Start signal received successfully");
+        }
+        Err(e) => {
+            eprintln!("[Init] Failed to read start signal: {}", e);
+            return 1;
+        }
+    }
+
+    // Phase 5: Execute user command with extensive debugging
+    println!("[Init] About to execute command: {:?}", config.args);
+    println!(
+        "[Init] Current working directory before exec: {:?}",
+        std::env::current_dir()
+    );
+    println!("[Init] Environment PATH: {:?}", std::env::var("PATH"));
+
+    // Test command one more time before exec
+    if !config.args.is_empty() {
+        let cmd = &config.args[0];
+        if Path::new(cmd).exists() {
+            println!("[Init] ✓ Final validation: Command {} exists", cmd);
+        } else {
+            eprintln!("[Init] ✗ CRITICAL: Command {} missing at exec time!", cmd);
+            return 1;
+        }
+    }
+
+    exec_user_command(config)
+}
+
+// Enhanced start signal reading with complete I/O handling
+fn read_start_signal(pipe_path: &str) -> Result<()> {
+    use std::io::Read;
+
+    println!("[Init] Opening start pipe: {}", pipe_path);
+
+    let mut pipe = std::fs::OpenOptions::new()
+        .read(true)
+        .open(pipe_path)
+        .with_context(|| format!("Failed to open start pipe: {}", pipe_path))?;
+
+    let mut buffer = [0u8; 5]; // Expect exactly "start" (5 bytes)
+
+    // Use read_exact for atomic, complete reads
+    pipe.read_exact(&mut buffer)
+        .context("Failed to read complete start signal from pipe")?;
+
+    // Verify signal content
+    if &buffer == b"start" {
+        println!("[Init] Received valid start signal");
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "Invalid start signal received: {:?}",
+            String::from_utf8_lossy(&buffer)
+        ))
+    }
+}
+
+/*
+fn init_handler_with_pause(config: &Config, _start_pipe_fd: i32) -> isize {
+    println!("[Init] I am PID 1 in container: {}", getpid());
 
     if let Err(e) = debug_namespace_info() {
         eprintln!("[Init] Failed to debug namespace info: {e}");
@@ -431,17 +635,17 @@ fn init_handler_with_pause(config: &Config, _start_pipe_fd: i32) -> isize {
     match std_fs::OpenOptions::new().read(true).open(&start_pipe_path) {
         Ok(_pipe) => {
             let _buffer = [0u8; 1];
-            
+
             match read_start_signal(&start_pipe_path) {
-		    Ok(()) => {
-        		println!("[Init] Start signal processing complete");
-			}
-    		    Err(e) => {
-        		eprintln!("[Init] Failed to process start signal: {e}");
-        		return 1;
-    		    }
-	    }
-	}
+            Ok(()) => {
+                println!("[Init] Start signal processing complete");
+            }
+                Err(e) => {
+                eprintln!("[Init] Failed to process start signal: {e}");
+                return 1;
+                }
+        }
+    }
         Err(e) => {
             eprintln!("[Init] Failed to open start pipe: {e}");
             return 1;
@@ -452,6 +656,8 @@ fn init_handler_with_pause(config: &Config, _start_pipe_fd: i32) -> isize {
     println!("[Init] Executing user command: {:?}", config.args);
     exec_user_command(config)
 }
+
+*/
 
 // NEW: Environment setup function
 fn setup_container_environment() -> Result<()> {
@@ -552,7 +758,44 @@ fn exec_user_command(config: &Config) -> isize {
 }
 
 pub fn start_container(container_id: &str) -> Result<()> {
-    let state = load_container_state(container_id)?;
+    // Load container state
+    let mut state = load_container_state(container_id)
+        .with_context(|| format!("Failed to load state for container '{}'", container_id))?;
+
+    println!(
+        "[Start] Loading container '{}' (PID: {})",
+        container_id, state.pid
+    );
+
+    // Validate that the process is actually alive
+    let container_pid = Pid::from_raw(state.pid);
+    match kill(container_pid, Signal::SIGCONT) {
+        Ok(_) => {
+            println!("[Start] Container process {} is alive", state.pid);
+        }
+        Err(_) => {
+            // Process is dead - clean up and fail
+            println!(
+                "[Start] Container process {} is dead, cleaning up",
+                state.pid
+            );
+            state.status = "stopped".to_string();
+            save_container_state(container_id, &state)?;
+            return Err(anyhow!("Container process {} no longer exists", state.pid));
+        }
+    }
+
+    // Check container state - handle inconsistent states
+    if state.status == "running" {
+        // Process is alive but state says running - check if actually running
+        println!("[Start] Container claims to be running, verifying...");
+        return Err(anyhow!(
+            "Container '{}' appears to already be running (PID: {}). Use 'kill' to stop it first.",
+            container_id,
+            state.pid
+        ));
+    }
+
     if state.status != "created" {
         return Err(anyhow!(
             "Container '{}' is not in 'created' state (current: {})",
@@ -561,93 +804,248 @@ pub fn start_container(container_id: &str) -> Result<()> {
         ));
     }
 
-    println!(
-        "[Start] Loading container '{}' (PID: {})",
-        container_id, state.pid
+    // Send start signal via pipe
+    let start_pipe_path = state
+        .start_pipe_path
+        .as_ref()
+        .ok_or_else(|| anyhow!("No start pipe path in container state"))?;
+
+    // Convert container path to host path
+    let home = std::env::var("HOME")?;
+    let host_pipe_path = format!(
+        "{}/.local/share/bento/{}/rootfs{}",
+        home, container_id, start_pipe_path
     );
 
-    // Check if process is still alive
-    if kill(nix::unistd::Pid::from_raw(state.pid), Signal::SIGCONT).is_err() {
-        return Err(anyhow!(
-            "Container process {} is no longer running",
-            state.pid
-        ));
-    }
+    println!("[Start] Sending start signal via: {}", host_pipe_path);
 
-    // Convert container path to host path for writing
-    if let Some(ref container_pipe_path) = state.start_pipe_path {
-        let home = std::env::var("HOME")?;
-        let host_pipe_path = format!(
-            "{home}/.local/share/bento/{container_id}/rootfs{container_pipe_path}"
-        );
+    // Open and write to the named pipe with error handling
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .open(&host_pipe_path)
+    {
+        Ok(mut pipe) => {
+            use std::io::Write;
 
-        match std_fs::OpenOptions::new().write(true).open(&host_pipe_path) {
-            Ok(_pipe) => {
-                
-		match send_start_signal(&host_pipe_path) {
-    		    Ok(()) => {
-        		println!("[Start] Container start signal sent successfully");
-                    }
-    		    Err(e) => {
-        		return Err(anyhow!("Failed to send start signal: {}", e));
-                    }
+            // Write the complete start signal
+            match pipe.write_all(b"start") {
+                Ok(_) => {
+                    // Ensure data reaches the pipe
+                    pipe.flush().context("Failed to flush start signal")?;
+                    println!("[Start] Successfully sent complete start signal");
                 }
-
+                Err(e) => {
+                    return Err(anyhow!("Failed to write start signal: {}", e));
+                }
             }
-            Err(e) => return Err(anyhow!("Failed to open start pipe: {}", e)),
         }
-    } else {
-        return Err(anyhow!("No start pipe path found in container state"));
+        Err(e) => {
+            return Err(anyhow!(
+                "Failed to open start pipe {}: {}",
+                host_pipe_path,
+                e
+            ));
+        }
     }
 
-    // Update state to running
-    let mut updated_state = state;
-    updated_state.status = "running".to_string();
-    save_container_state(container_id, &updated_state)?;
+    // Update container state to running
+    state.status = "running".to_string();
+    save_container_state(container_id, &state)
+        .context("Failed to update container state after start")?;
 
-    println!("[Start] Container '{container_id}' is now running");
+    // Clean up the named pipe from host perspective
+    let _ = std::fs::remove_file(&host_pipe_path);
+
+    println!("[Start] Container '{}' is now running", container_id);
     Ok(())
 }
 
+/*
 fn read_start_signal(pipe_path: &str) -> Result<()> {
     use std::io::Read;
-    
+
     let mut pipe = std::fs::OpenOptions::new()
         .read(true)
         .open(pipe_path)?;
-    
+
     let mut buffer = [0u8; 5]; // Expect exactly "start" (5 bytes)
-    
+
     // Use read_exact for atomic, complete reads
     pipe.read_exact(&mut buffer)
         .context("Failed to read complete start signal")?;
-    
+
     // Verify signal content
     if &buffer != b"start" {
-        return Err(anyhow!("Invalid start signal received: {:?}", 
+        return Err(anyhow!("Invalid start signal received: {:?}",
                           String::from_utf8_lossy(&buffer)));
     }
-    
+
     println!("[Init] Received complete start signal - proceeding to exec");
     Ok(())
 }
-
+*/
 // FIXED: Robust write with amount verification
 fn send_start_signal(pipe_path: &str) -> Result<()> {
     use std::io::Write;
-    
-    let mut pipe = std::fs::OpenOptions::new()
-        .write(true)
-        .open(pipe_path)?;
-    
+
+    let mut pipe = std::fs::OpenOptions::new().write(true).open(pipe_path)?;
+
     // Use write_all for atomic, complete writes
     pipe.write_all(b"start")
         .context("Failed to write complete start signal")?;
-    
+
     // Ensure data reaches the pipe
     pipe.flush()
         .context("Failed to flush start signal to pipe")?;
-    
+
     println!("[Start] Successfully sent complete start signal");
     Ok(())
+}
+
+pub fn cleanup_named_pipes(container_id: &str) -> Result<()> {
+    let home = std::env::var("HOME").context("HOME environment variable not set")?;
+
+    let pipe_paths = [
+        format!("/tmp/bento-start-{}", container_id),
+        format!(
+            "{}/.local/share/bento/{}/rootfs/tmp/bento-start-{}",
+            home, container_id, container_id
+        ),
+    ];
+
+    for path in &pipe_paths {
+        if Path::new(path).exists() {
+            match std::fs::remove_file(path) {
+                Ok(_) => println!("[Cleanup] Removed stale named pipe: {}", path),
+                Err(e) => println!("[Cleanup] Warning: Failed to remove {}: {}", path, e),
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Container information for listing purposes
+#[derive(Debug, Clone)]
+pub struct ContainerInfo {
+    pub id: String,
+    pub pid: i32,
+    pub status: ContainerStatus,
+    pub bundle_path: String,
+    pub created_at: String,
+    pub runtime_status: RuntimeStatus,
+}
+
+/// Container status enumeration
+#[derive(Debug, Clone)]
+pub enum ContainerStatus {
+    Created,
+    Running,
+    Stopped,
+    Paused,
+}
+
+/// Runtime status based on actual process state
+#[derive(Debug, Clone)]
+pub enum RuntimeStatus {
+    Alive,
+    Dead,
+    Unknown,
+}
+
+impl ContainerInfo {
+    /// Create ContainerInfo from ContainerState with process validation
+    fn from_state(state: ContainerState) -> Result<Self> {
+        // Verify if the process is still alive using a harmless signal
+        let runtime_status = match kill(Pid::from_raw(state.pid), Signal::SIGCONT) {
+            Ok(_) => RuntimeStatus::Alive,
+            Err(_) => RuntimeStatus::Dead,
+        };
+
+        let status = match state.status.as_str() {
+            "created" => ContainerStatus::Created,
+            "running" => ContainerStatus::Running,
+            "stopped" => ContainerStatus::Stopped,
+            "paused" => ContainerStatus::Paused,
+            _ => ContainerStatus::Created, // Default fallback
+        };
+
+        Ok(Self {
+            id: state.id,
+            pid: state.pid,
+            status,
+            bundle_path: state.bundle_path,
+            created_at: state.created_at,
+            runtime_status,
+        })
+    }
+
+    /// Display status combining container status and runtime status
+    pub fn display_status(&self) -> String {
+        match (&self.status, &self.runtime_status) {
+            (ContainerStatus::Running, RuntimeStatus::Alive) => "running".to_string(),
+            (ContainerStatus::Created, RuntimeStatus::Alive) => "created".to_string(),
+            (_, RuntimeStatus::Dead) => "stopped".to_string(),
+            (ContainerStatus::Paused, RuntimeStatus::Alive) => "paused".to_string(),
+            _ => "unknown".to_string(),
+        }
+    }
+}
+
+/// List all containers by reading state files from the state directory
+pub fn list_containers() -> Result<Vec<ContainerInfo>> {
+    let state_dir = get_state_dir()?;
+    let mut containers = Vec::new();
+
+    // Check if state directory exists
+    if !state_dir.exists() {
+        println!("[List] No container state directory found");
+        return Ok(containers);
+    }
+
+    // Read all state files from the state directory
+    for entry in std::fs::read_dir(&state_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+
+        // Only process JSON state files
+        if path.extension().and_then(|s| s.to_str()) == Some("json") {
+            match load_container_state_from_file(&path) {
+                Ok(state) => match ContainerInfo::from_state(state) {
+                    Ok(container_info) => containers.push(container_info),
+                    Err(e) => {
+                        eprintln!(
+                            "[List] Warning: Failed to process container info from {}: {}",
+                            path.display(),
+                            e
+                        );
+                    }
+                },
+                Err(e) => {
+                    eprintln!(
+                        "[List] Warning: Failed to load state from {}: {}",
+                        path.display(),
+                        e
+                    );
+                }
+            }
+        }
+    }
+
+    // Sort containers by creation time for consistent output
+    containers.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+
+    println!("[List] Found {} containers", containers.len());
+    Ok(containers)
+}
+
+/// Load container state from a specific file path
+fn load_container_state_from_file(path: &std::path::Path) -> Result<ContainerState> {
+    let json_content = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read state file: {}", path.display()))?;
+
+    let state: ContainerState = serde_json::from_str(&json_content)
+        .with_context(|| format!("Failed to parse state file: {}", path.display()))?;
+
+    Ok(state)
 }

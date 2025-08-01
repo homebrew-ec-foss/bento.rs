@@ -16,9 +16,7 @@ use std::{
 
 fn get_rootfs(container_id: &str) -> Result<(PathBuf, PathBuf)> {
     let home = std::env::var("HOME")?;
-    let rootfs = PathBuf::from(format!(
-        "{home}/.local/share/bento/{container_id}/rootfs"
-    ));
+    let rootfs = PathBuf::from(format!("{home}/.local/share/bento/{container_id}/rootfs"));
 
     fs::create_dir_all(&rootfs).context("Failed to create the rootfs directory.")?;
 
@@ -30,9 +28,7 @@ fn get_rootfs(container_id: &str) -> Result<(PathBuf, PathBuf)> {
 
 // FIXED: Added config parameter to function signature
 pub fn prepare_rootfs(container_id: &str, config: &Config) -> Result<PathBuf> {
-    println!(
-        "[Init] Starting rootless-aware rootfs preparation for: {container_id}"
-    );
+    println!("[Init] Starting rootless-aware rootfs preparation for: {container_id}");
 
     // Phase 1: Reset mount propagation to prevent host contamination
     mount(
@@ -145,9 +141,7 @@ fn populate_manual_binaries(rootfs: &Path) -> Result<()> {
     // Copy shared libraries (essential for dynamic binaries)
     copy_shared_libraries(&lib_dir, &lib64_dir)?;
 
-    println!(
-        "[Rootfs] Manual population complete: {successful_copies} binaries copied"
-    );
+    println!("[Rootfs] Manual population complete: {successful_copies} binaries copied");
     Ok(())
 }
 
@@ -215,16 +209,12 @@ fn populate_busybox_binaries(rootfs: &Path) -> Result<()> {
                 println!("[Rootfs] Created command symlink: {cmd}");
             }
             Err(e) => {
-                println!(
-                    "[Rootfs] Warning: Failed to create symlink for {cmd}: {e}"
-                );
+                println!("[Rootfs] Warning: Failed to create symlink for {cmd}: {e}");
             }
         }
     }
 
-    println!(
-        "[Rootfs] BusyBox setup complete: {created_commands} commands available"
-    );
+    println!("[Rootfs] BusyBox setup complete: {created_commands} commands available");
     Ok(())
 }
 
@@ -342,9 +332,7 @@ fn copy_shared_libraries(lib_dir: &Path, lib64_dir: &Path) -> Result<()> {
                 println!("[Rootfs] Copied library: {}", target_file.display());
             }
             Err(e) => {
-                println!(
-                    "[Rootfs] Warning: Failed to copy library {source_path}: {e}"
-                );
+                println!("[Rootfs] Warning: Failed to copy library {source_path}: {e}");
             }
         }
     }
@@ -369,9 +357,7 @@ fn rootless_mount_proc(rootfs: &Path) -> Result<()> {
             Ok(())
         }
         Err(e) => {
-            println!(
-                "[Mount] /proc mount failed: {e}, creating minimal structure"
-            );
+            println!("[Mount] /proc mount failed: {e}, creating minimal structure");
             create_minimal_proc_structure(&proc_path)?;
             Ok(())
         }
@@ -660,9 +646,7 @@ fn create_dev_symlinks(dev_path: &Path) -> Result<()> {
     for (link_name, target) in &symlinks {
         let link_path = dev_path.join(link_name);
         if let Err(e) = symlink(target, &link_path) {
-            println!(
-                "[Mount] Warning: Failed to create symlink {link_name}: {e}"
-            );
+            println!("[Mount] Warning: Failed to create symlink {link_name}: {e}");
         } else {
             println!("[Mount] Created symlink: /dev/{link_name} -> {target}");
         }
