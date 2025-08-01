@@ -13,9 +13,9 @@ impl BinaryChecker {
     }
 
     pub fn validate_required_binaries() -> Result<()> {
-        if !Self::binary_exists("rootlesskit") {
+        if !Self::binary_exists("unshare") {
             return Err(anyhow!(
-                "rootlesskit not found. Install from https://github.com/rootless-containers/rootlesskit or via apt"
+                "unshare not found. Install with: sudo apt-get install util-linux"
             ));
         }
 
@@ -32,7 +32,7 @@ impl BinaryChecker {
         println!("🔍 Checking system capabilities...\n");
 
         Self::validate_required_binaries()?;
-        println!("✅ rootlesskit found");
+        println!("✅ unshare found");
         println!("✅ slirp4netns found");
 
         let max_ns = std::fs::read_to_string("/proc/sys/user/max_user_namespaces")
@@ -50,7 +50,7 @@ impl BinaryChecker {
         }
 
         println!("✅ User namespaces enabled (max: {})", max);
-        println!("\n🎉 System ready for networking!");
+        println!("\n🎉 System ready for direct networking!");
 
         Ok(())
     }

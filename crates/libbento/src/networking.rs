@@ -4,8 +4,22 @@ use std::process::{Command, Stdio};
 
 #[derive(Debug, Clone)]
 pub struct NetworkConfig {
-    pub port_mappings: Vec<String>,
+    pub port_mappings: Vec<PortMapping>,
     pub command: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PortMapping {
+    pub host_port: u16,
+    pub container_port: u16,
+    pub protocol: Protocol,
+    pub bind_addr: String,
+}
+
+#[derive(Debug, Clone)]
+pub enum Protocol {
+    Tcp,
+    Udp,
 }
 
 impl NetworkConfig {
@@ -16,72 +30,149 @@ impl NetworkConfig {
         }
     }
 
-    pub fn with_ports(mut self, ports: Vec<String>) -> Self {
+    pub fn with_ports(mut self, ports: Vec<PortMapping>) -> Self {
         self.port_mappings = ports;
         self
     }
 }
 
 pub fn setup_network(config: &NetworkConfig) -> Result<()> {
+    println!("🚀 Setting up networking...");
+
     BinaryChecker::validate_required_binaries()?;
 
-    let mut cmd = Command::new("rootlesskit");
+    let can_unshare = test_unshare_capability();
+    if !can_unshare {
+        println!("⚠️ Cannot create network namespaces (requires privileges or sysctl settings)");
+        println!("💡 Running command in current namespace...");
+        return run_in_current_namespace(config);
+    }
 
-    cmd.arg("--net=slirp4netns");
-    cmd.arg("--disable-host-loopback");
+    let mut cmd = Command::new("unshare");
+    cmd.args(&["--net", "--fork"]);
+    cmd.arg("sh").arg("-c");
 
-    // Use builtin port driver for port forwarding if we have port mappings
+    let mut setup_script = String::new();
+    setup_script.push_str(
+        "(slirp4netns --configure --mtu=65520 --disable-host-loopback $$ tap0 &) && sleep 2\n",
+    );
+
     if !config.port_mappings.is_empty() {
-        cmd.arg("--port-driver=builtin");
-        for port_mapping in &config.port_mappings {
-            cmd.arg(format!("--publish={}", port_mapping));
+        println!("⚠️ Port forwarding not yet implemented in direct mode");
+    }
+
+    for (i, arg) in config.command.iter().enumerate() {
+        if i > 0 {
+            setup_script.push(' ');
+        }
+        if arg.contains(' ') || arg.contains('"') || arg.contains('\'') {
+            setup_script.push_str(&format!("'{}'", arg.replace('\'', "'\\''")));
+        } else {
+            setup_script.push_str(arg);
         }
     }
 
-    cmd.arg("--");
-    cmd.args(&config.command);
-
+    cmd.arg(setup_script);
     cmd.stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
 
-    println!("🚀 Starting container with slirp4netns networking...");
-    println!("Command: {:?}", cmd);
-
+    println!("🌐 Starting container...");
     let status = cmd
         .status()
-        .map_err(|e| anyhow!("Failed to execute rootlesskit: {}", e))?;
-
+        .map_err(|e| anyhow!("Failed to execute: {}", e))?;
     if !status.success() {
-        return Err(anyhow!("rootlesskit exited with status: {}", status));
+        return Err(anyhow!("Network setup failed: {}", status));
     }
-
     Ok(())
 }
 
-pub fn parse_port_mappings(port_str: &str) -> Vec<String> {
+fn test_unshare_capability() -> bool {
+    let test_result = Command::new("unshare").args(&["--net", "true"]).output();
+
+    match test_result {
+        Ok(output) => output.status.success(),
+        Err(_) => false,
+    }
+}
+
+fn run_in_current_namespace(config: &NetworkConfig) -> Result<()> {
+    println!("🚀 Executing in current namespace (no isolation)...");
+
+    if !config.port_mappings.is_empty() {
+        println!("⚠️ Port forwarding not available without network namespace");
+    }
+
+    if config.command.is_empty() {
+        return Err(anyhow!("No command specified"));
+    }
+
+    let status = Command::new(&config.command[0])
+        .args(&config.command[1..])
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .map_err(|e| anyhow!("Failed to execute: {}", e))?;
+
+    if !status.success() {
+        return Err(anyhow!("Command failed: {}", status));
+    }
+    Ok(())
+}
+
+pub fn parse_port_mappings(port_str: &str) -> Vec<PortMapping> {
     port_str
         .split(',')
-        .map(|s| {
+        .filter_map(|s| {
             let trimmed = s.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
 
-            // Check if it already has a bind address
-            if trimmed.starts_with("127.0.0.1:") || trimmed.starts_with("0.0.0.0:") {
-                // Add /tcp if no protocol is specified
-                if trimmed.contains('/') {
-                    trimmed.to_string()
-                } else {
-                    format!("{}/tcp", trimmed)
-                }
+            let parts: Vec<&str> = if trimmed.contains(':') {
+                trimmed.split(':').collect()
             } else {
-                // Add bind address and protocol
-                if trimmed.contains('/') {
-                    format!("127.0.0.1:{}", trimmed)
-                } else {
-                    format!("127.0.0.1:{}/tcp", trimmed)
+                return None;
+            };
+
+            match parts.len() {
+                2 => {
+                    let host_port = parts[0].parse().ok()?;
+                    let (container_port, protocol) = parse_port_and_protocol(parts[1]);
+                    Some(PortMapping {
+                        host_port,
+                        container_port: container_port?,
+                        protocol,
+                        bind_addr: "127.0.0.1".to_string(),
+                    })
                 }
+                3 => {
+                    let bind_addr = parts[0].to_string();
+                    let host_port = parts[1].parse().ok()?;
+                    let (container_port, protocol) = parse_port_and_protocol(parts[2]);
+                    Some(PortMapping {
+                        host_port,
+                        container_port: container_port?,
+                        protocol,
+                        bind_addr,
+                    })
+                }
+                _ => None,
             }
         })
-        .filter(|s| !s.is_empty())
         .collect()
+}
+
+fn parse_port_and_protocol(port_str: &str) -> (Option<u16>, Protocol) {
+    if let Some(slash_pos) = port_str.find('/') {
+        let port = port_str[..slash_pos].parse().ok();
+        let protocol = match &port_str[slash_pos + 1..] {
+            "udp" => Protocol::Udp,
+            _ => Protocol::Tcp,
+        };
+        (port, protocol)
+    } else {
+        (port_str.parse().ok(), Protocol::Tcp)
+    }
 }
