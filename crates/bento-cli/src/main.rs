@@ -1,8 +1,9 @@
+// crates/bento-cli/src/main.rs
+
 use clap::{Parser, Subcommand, ValueHint};
-use libbento::process::{Config, create_container, start_container};
+use libbento::process::{Config, RootfsPopulationMethod, create_container, start_container};
 use log::info;
 use std::path::PathBuf;
-use std::os::unix::io::FromRawFd;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -20,6 +21,9 @@ pub enum Commands {
         container_id: String,
         #[arg(short, long, required = true, value_hint = ValueHint::FilePath)]
         bundle: PathBuf,
+        /// Rootfs population method: 'busybox' for static binary or 'manual' for host binary copying
+        #[arg(long, default_value = "busybox", help = "Method to populate container rootfs: 'busybox' or 'manual'")]
+        population_method: String,
     },
     Start {
         #[arg(required = true)]
@@ -52,38 +56,45 @@ fn main() {
         Commands::Create {
             container_id,
             bundle,
+            population_method, // Add this parameter
         } => {
             println!(
-                "Creating container '{}' with bundle '{}'",
+                "Creating container '{}' with bundle '{}' using {} method",
                 container_id,
-                bundle.display()
+                bundle.display(),
+                population_method
             );
 
-            let mut config = Config::default(); // TODO: Load from bundle/config.json
-	    config.container_id = container_id.clone();
-	    config.bundle_path = bundle.to_string_lossy().to_string();
+            let mut config = Config::default();
+            config.container_id = container_id.clone();
+            config.bundle_path = bundle.to_string_lossy().to_string();
+            
+            // Convert string to enum
+            config.population_method = match population_method.as_str() {
+                "manual" => RootfsPopulationMethod::Manual,
+                "busybox" | _ => RootfsPopulationMethod::BusyBox, // Default to busybox for invalid values
+            };
+            
             match create_container(&config) {
-	        Ok(_) => println!("Container '{}' created successfully", container_id),
-        	Err(e) => {
-            	eprintln!("Container creation failed: {e}");
-            	std::process::exit(1);
+                Ok(_) => println!("Container '{}' created successfully", container_id),
+                Err(e) => {
+                    eprintln!("Container creation failed: {e}");
+                    std::process::exit(1);
+                }
             }
-    }
-
-	}
+        }
         Commands::Start { container_id } => {
             println!("Starting container '{container_id}'");
-        	match start_container(&container_id) {
-	        	Ok(_) => println!("Container '{}' started successfully", container_id),
-        		Err(e) => {
-            			eprintln!("Failed to start container '{}': {}", container_id, e);
-            			std::process::exit(1);
-        		}
-    		}
+            match start_container(&container_id) {
+                Ok(_) => println!("Container '{}' started successfully", container_id),
+                Err(e) => {
+                    eprintln!("Failed to start container '{}': {}", container_id, e);
+                    std::process::exit(1);
+                }
+            }
         }
         Commands::State { container_id } => {
             println!("State of container '{container_id}'");
-            
             todo!("Load and display container status from state file");
         }
         Commands::List {} => {
@@ -96,7 +107,8 @@ fn main() {
         }
         Commands::Delete { container_id } => {
             println!("Deleting container '{container_id}'");
-            todo!("Clean up container state and resources");
+            todo!("Clean up container resources");
         }
     }
 }
+
