@@ -17,8 +17,7 @@ use std::{
 fn get_rootfs(container_id: &str) -> Result<(PathBuf, PathBuf)> {
     let home = std::env::var("HOME")?;
     let rootfs = PathBuf::from(format!(
-        "{}/.local/share/bento/{}/rootfs",
-        home, container_id
+        "{home}/.local/share/bento/{container_id}/rootfs"
     ));
 
     fs::create_dir_all(&rootfs).context("Failed to create the rootfs directory.")?;
@@ -32,8 +31,7 @@ fn get_rootfs(container_id: &str) -> Result<(PathBuf, PathBuf)> {
 // FIXED: Added config parameter to function signature
 pub fn prepare_rootfs(container_id: &str, config: &Config) -> Result<PathBuf> {
     println!(
-        "[Init] Starting rootless-aware rootfs preparation for: {}",
-        container_id
+        "[Init] Starting rootless-aware rootfs preparation for: {container_id}"
     );
 
     // Phase 1: Reset mount propagation to prevent host contamination
@@ -51,7 +49,7 @@ pub fn prepare_rootfs(container_id: &str, config: &Config) -> Result<PathBuf> {
     }
 
     let (rootfs, old_root) = get_rootfs(container_id)?;
-    println!("[Init] Rootfs: {:?}, Old root: {:?}", rootfs, old_root);
+    println!("[Init] Rootfs: {rootfs:?}, Old root: {old_root:?}");
 
     // Now this works because config parameter exists
     populate_rootfs_binaries(&rootfs, &config.population_method)?;
@@ -113,13 +111,11 @@ fn populate_manual_binaries(rootfs: &Path) -> Result<()> {
         ("/bin/cat", bin_dir.join("cat")),
         ("/bin/ls", bin_dir.join("ls")),
         ("/bin/echo", bin_dir.join("echo")),
-        
-        // System information utilities  
+        // System information utilities
         ("/usr/bin/id", usr_bin_dir.join("id")),
         ("/bin/hostname", bin_dir.join("hostname")),
         ("/usr/bin/whoami", usr_bin_dir.join("whoami")),
         ("/usr/bin/env", usr_bin_dir.join("env")),
-        
         // File utilities
         ("/usr/bin/head", usr_bin_dir.join("head")),
         ("/usr/bin/tail", usr_bin_dir.join("tail")),
@@ -138,18 +134,20 @@ fn populate_manual_binaries(rootfs: &Path) -> Result<()> {
                     successful_copies += 1;
                 }
                 Err(e) => {
-                    println!("[Rootfs] Warning: Failed to copy {}: {}", source, e);
+                    println!("[Rootfs] Warning: Failed to copy {source}: {e}");
                 }
             }
         } else {
-            println!("[Rootfs] Warning: {} not found on host", source);
+            println!("[Rootfs] Warning: {source} not found on host");
         }
     }
 
     // Copy shared libraries (essential for dynamic binaries)
     copy_shared_libraries(&lib_dir, &lib64_dir)?;
 
-    println!("[Rootfs] Manual population complete: {} binaries copied", successful_copies);
+    println!(
+        "[Rootfs] Manual population complete: {successful_copies} binaries copied"
+    );
     Ok(())
 }
 
@@ -162,9 +160,9 @@ fn populate_busybox_binaries(rootfs: &Path) -> Result<()> {
 
     // Look for BusyBox in multiple locations
     let busybox_locations = [
-        "/tmp/bento-test-rootfs/bin/busybox",  // From your earlier setup
-        "/tmp/busybox-static",                 // Alternative location
-        "./busybox-static",                    // Local copy
+        "/tmp/bento-test-rootfs/bin/busybox", // From your earlier setup
+        "/tmp/busybox-static",                // Alternative location
+        "./busybox-static",                   // Local copy
     ];
 
     let mut busybox_source = None;
@@ -192,27 +190,15 @@ fn populate_busybox_binaries(rootfs: &Path) -> Result<()> {
     // Create comprehensive command symlinks
     let busybox_commands = [
         // Essential shell commands
-        "sh", "ash", "bash",
-        
-        // File operations
-        "cat", "ls", "cp", "mv", "rm", "mkdir", "rmdir", "touch",
-        
-        // Text processing
+        "sh", "ash", "bash", // File operations
+        "cat", "ls", "cp", "mv", "rm", "mkdir", "rmdir", "touch", // Text processing
         "echo", "printf", "grep", "sed", "awk", "cut", "sort", "uniq", "head", "tail",
-        
         // System information
-        "id", "whoami", "hostname", "uname", "uptime", "ps", "top",
-        
-        // File system
+        "id", "whoami", "hostname", "uname", "uptime", "ps", "top", // File system
         "mount", "umount", "df", "du", "find", "which",
-        
         // Network utilities (for future enhancements)
-        "ping", "wget", "netstat",
-        
-        // Archive utilities
-        "tar", "gzip", "gunzip",
-        
-        // System utilities
+        "ping", "wget", "netstat", // Archive utilities
+        "tar", "gzip", "gunzip", // System utilities
         "env", "sleep", "kill", "pkill",
     ];
 
@@ -226,15 +212,19 @@ fn populate_busybox_binaries(rootfs: &Path) -> Result<()> {
         match std::os::unix::fs::symlink("busybox", &link_path) {
             Ok(()) => {
                 created_commands += 1;
-                println!("[Rootfs] Created command symlink: {}", cmd);
+                println!("[Rootfs] Created command symlink: {cmd}");
             }
             Err(e) => {
-                println!("[Rootfs] Warning: Failed to create symlink for {}: {}", cmd, e);
+                println!(
+                    "[Rootfs] Warning: Failed to create symlink for {cmd}: {e}"
+                );
             }
         }
     }
 
-    println!("[Rootfs] BusyBox setup complete: {} commands available", created_commands);
+    println!(
+        "[Rootfs] BusyBox setup complete: {created_commands} commands available"
+    );
     Ok(())
 }
 
@@ -246,39 +236,92 @@ fn copy_shared_libraries(lib_dir: &Path, lib64_dir: &Path) -> Result<()> {
     // Critical shared libraries for most Unix utilities
     let essential_libraries = [
         // Dynamic linker (most critical)
-        ("/lib64/ld-linux-x86-64.so.2", lib64_dir.join("ld-linux-x86-64.so.2")),
-        
+        (
+            "/lib64/ld-linux-x86-64.so.2",
+            lib64_dir.join("ld-linux-x86-64.so.2"),
+        ),
         // Core C library
-        ("/lib/x86_64-linux-gnu/libc.so.6", lib_dir.join("x86_64-linux-gnu")),
-        ("/lib/x86_64-linux-gnu/libm.so.6", lib_dir.join("x86_64-linux-gnu")),
-        ("/lib/x86_64-linux-gnu/libdl.so.2", lib_dir.join("x86_64-linux-gnu")),
-        ("/lib/x86_64-linux-gnu/libpthread.so.0", lib_dir.join("x86_64-linux-gnu")),
-        
+        (
+            "/lib/x86_64-linux-gnu/libc.so.6",
+            lib_dir.join("x86_64-linux-gnu"),
+        ),
+        (
+            "/lib/x86_64-linux-gnu/libm.so.6",
+            lib_dir.join("x86_64-linux-gnu"),
+        ),
+        (
+            "/lib/x86_64-linux-gnu/libdl.so.2",
+            lib_dir.join("x86_64-linux-gnu"),
+        ),
+        (
+            "/lib/x86_64-linux-gnu/libpthread.so.0",
+            lib_dir.join("x86_64-linux-gnu"),
+        ),
         // PCRE2 libraries (NEW - these are what's missing!)
-        ("/lib/x86_64-linux-gnu/libpcre2-8.so.0", lib_dir.join("x86_64-linux-gnu")),
-        ("/lib/x86_64-linux-gnu/libpcre.so.3", lib_dir.join("x86_64-linux-gnu")),
-        ("/lib/x86_64-linux-gnu/libpcre2-32.so.0", lib_dir.join("x86_64-linux-gnu")),
-     
-        // System utilities libraries  
-        ("/lib/x86_64-linux-gnu/libnss_files.so.2", lib_dir.join("x86_64-linux-gnu")),
-        ("/lib/x86_64-linux-gnu/libutil.so.1", lib_dir.join("x86_64-linux-gnu")),
-	// Additional libraries (add these!)
-        ("/lib/x86_64-linux-gnu/libselinux.so.1", lib_dir.join("x86_64-linux-gnu")),
-        ("/lib/x86_64-linux-gnu/libpcre.so.1", lib_dir.join("x86_64-linux-gnu")),
-        ("/lib/x86_64-linux-gnu/libcap.so.2", lib_dir.join("x86_64-linux-gnu")),
-        ("/lib/x86_64-linux-gnu/libcrypt.so.1", lib_dir.join("x86_64-linux-gnu")),
-        ("/lib/x86_64-linux-gnu/libresolv.so.2", lib_dir.join("x86_64-linux-gnu")),
-        ("/lib/x86_64-linux-gnu/libnss_files.so.2", lib_dir.join("x86_64-linux-gnu")),
-        ("/lib/x86_64-linux-gnu/libnss_dns.so.2", lib_dir.join("x86_64-linux-gnu")),
-        ("/lib/x86_64-linux-gnu/libutil.so.1", lib_dir.join("x86_64-linux-gnu")),
-        ("/lib/x86_64-linux-gnu/librt.so.1", lib_dir.join("x86_64-linux-gnu")),
+        (
+            "/lib/x86_64-linux-gnu/libpcre2-8.so.0",
+            lib_dir.join("x86_64-linux-gnu"),
+        ),
+        (
+            "/lib/x86_64-linux-gnu/libpcre.so.3",
+            lib_dir.join("x86_64-linux-gnu"),
+        ),
+        (
+            "/lib/x86_64-linux-gnu/libpcre2-32.so.0",
+            lib_dir.join("x86_64-linux-gnu"),
+        ),
+        // System utilities libraries
+        (
+            "/lib/x86_64-linux-gnu/libnss_files.so.2",
+            lib_dir.join("x86_64-linux-gnu"),
+        ),
+        (
+            "/lib/x86_64-linux-gnu/libutil.so.1",
+            lib_dir.join("x86_64-linux-gnu"),
+        ),
+        // Additional libraries (add these!)
+        (
+            "/lib/x86_64-linux-gnu/libselinux.so.1",
+            lib_dir.join("x86_64-linux-gnu"),
+        ),
+        (
+            "/lib/x86_64-linux-gnu/libpcre.so.1",
+            lib_dir.join("x86_64-linux-gnu"),
+        ),
+        (
+            "/lib/x86_64-linux-gnu/libcap.so.2",
+            lib_dir.join("x86_64-linux-gnu"),
+        ),
+        (
+            "/lib/x86_64-linux-gnu/libcrypt.so.1",
+            lib_dir.join("x86_64-linux-gnu"),
+        ),
+        (
+            "/lib/x86_64-linux-gnu/libresolv.so.2",
+            lib_dir.join("x86_64-linux-gnu"),
+        ),
+        (
+            "/lib/x86_64-linux-gnu/libnss_files.so.2",
+            lib_dir.join("x86_64-linux-gnu"),
+        ),
+        (
+            "/lib/x86_64-linux-gnu/libnss_dns.so.2",
+            lib_dir.join("x86_64-linux-gnu"),
+        ),
+        (
+            "/lib/x86_64-linux-gnu/libutil.so.1",
+            lib_dir.join("x86_64-linux-gnu"),
+        ),
+        (
+            "/lib/x86_64-linux-gnu/librt.so.1",
+            lib_dir.join("x86_64-linux-gnu"),
+        ),
     ];
-
 
     for (source_path, target_base) in essential_libraries {
         let source = Path::new(source_path);
         if !source.exists() {
-            println!("[Rootfs] Library {} not found, skipping", source_path);
+            println!("[Rootfs] Library {source_path} not found, skipping");
             continue;
         }
 
@@ -299,7 +342,9 @@ fn copy_shared_libraries(lib_dir: &Path, lib64_dir: &Path) -> Result<()> {
                 println!("[Rootfs] Copied library: {}", target_file.display());
             }
             Err(e) => {
-                println!("[Rootfs] Warning: Failed to copy library {}: {}", source_path, e);
+                println!(
+                    "[Rootfs] Warning: Failed to copy library {source_path}: {e}"
+                );
             }
         }
     }
@@ -325,8 +370,7 @@ fn rootless_mount_proc(rootfs: &Path) -> Result<()> {
         }
         Err(e) => {
             println!(
-                "[Mount] /proc mount failed: {}, creating minimal structure",
-                e
+                "[Mount] /proc mount failed: {e}, creating minimal structure"
             );
             create_minimal_proc_structure(&proc_path)?;
             Ok(())
@@ -546,7 +590,7 @@ fn try_bind_mount_host_dev(dev_path: &Path) -> Result<()> {
             Ok(())
         }
         Err(e) => {
-            println!("[Mount] Bind mount of /dev failed: {}", e);
+            println!("[Mount] Bind mount of /dev failed: {e}");
             Err(e.into())
         }
     }
@@ -569,7 +613,7 @@ fn create_device_nodes_if_possible(dev_path: &Path) -> Result<()> {
             Mode::from_bits_truncate(mode),
             nix::libc::makedev(major, minor),
         )
-        .with_context(|| format!("Failed to create device node: {}", name))?;
+        .with_context(|| format!("Failed to create device node: {name}"))?;
     }
     Ok(())
 }
@@ -593,8 +637,8 @@ fn create_rootless_dev_structure(dev_path: &Path) -> Result<()> {
     for (name, content) in &fake_devices {
         let device_path = dev_path.join(name);
         fs::write(&device_path, content)
-            .with_context(|| format!("Failed to create placeholder {}", name))?;
-        println!("[Mount] Created placeholder: /dev/{}", name);
+            .with_context(|| format!("Failed to create placeholder {name}"))?;
+        println!("[Mount] Created placeholder: /dev/{name}");
     }
 
     create_dev_symlinks(dev_path)?;
@@ -617,11 +661,10 @@ fn create_dev_symlinks(dev_path: &Path) -> Result<()> {
         let link_path = dev_path.join(link_name);
         if let Err(e) = symlink(target, &link_path) {
             println!(
-                "[Mount] Warning: Failed to create symlink {}: {}",
-                link_name, e
+                "[Mount] Warning: Failed to create symlink {link_name}: {e}"
             );
         } else {
-            println!("[Mount] Created symlink: /dev/{} -> {}", link_name, target);
+            println!("[Mount] Created symlink: /dev/{link_name} -> {target}");
         }
     }
     Ok(())
@@ -644,14 +687,13 @@ fn cleanup_old_root() -> Result<()> {
 
     match umount2("/old_root", MntFlags::MNT_DETACH) {
         Ok(_) => println!("[Init] Old root unmounted"),
-        Err(e) => println!("[Init] Warning: Failed to unmount old root: {}", e),
+        Err(e) => println!("[Init] Warning: Failed to unmount old root: {e}"),
     }
 
     match fs::remove_dir_all("/old_root") {
         Ok(_) => println!("[Init] Old root directory removed"),
-        Err(e) => println!("[Init] Warning: Failed to remove old root: {}", e),
+        Err(e) => println!("[Init] Warning: Failed to remove old root: {e}"),
     }
 
     Ok(())
 }
-

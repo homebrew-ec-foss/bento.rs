@@ -22,7 +22,11 @@ pub enum Commands {
         #[arg(short, long, required = true, value_hint = ValueHint::FilePath)]
         bundle: PathBuf,
         /// Rootfs population method: 'busybox' for static binary or 'manual' for host binary copying
-        #[arg(long, default_value = "busybox", help = "Method to populate container rootfs: 'busybox' or 'manual'")]
+        #[arg(
+            long,
+            default_value = "busybox",
+            help = "Method to populate container rootfs: 'busybox' or 'manual'"
+        )]
         population_method: String,
     },
     Start {
@@ -65,18 +69,17 @@ fn main() {
                 population_method
             );
 
-            let mut config = Config::default();
-            config.container_id = container_id.clone();
-            config.bundle_path = bundle.to_string_lossy().to_string();
-            
-            // Convert string to enum
-            config.population_method = match population_method.as_str() {
-                "manual" => RootfsPopulationMethod::Manual,
-                "busybox" | _ => RootfsPopulationMethod::BusyBox, // Default to busybox for invalid values
-            };
-            
+	    let config = Config {
+        	container_id: container_id.clone(),
+        	bundle_path: bundle.to_string_lossy().to_string(),
+        	population_method: match population_method.as_str() {
+            		"manual" => RootfsPopulationMethod::Manual,
+            		_ => RootfsPopulationMethod::BusyBox, // Clear default handling
+        	},
+        	..Config::default() // Use default for remaining fields
+    	    };
             match create_container(&config) {
-                Ok(_) => println!("Container '{}' created successfully", container_id),
+                Ok(_) => println!("Container '{container_id}' created successfully"),
                 Err(e) => {
                     eprintln!("Container creation failed: {e}");
                     std::process::exit(1);
@@ -86,9 +89,9 @@ fn main() {
         Commands::Start { container_id } => {
             println!("Starting container '{container_id}'");
             match start_container(&container_id) {
-                Ok(_) => println!("Container '{}' started successfully", container_id),
+                Ok(_) => println!("Container '{container_id}' started successfully"),
                 Err(e) => {
-                    eprintln!("Failed to start container '{}': {}", container_id, e);
+                    eprintln!("Failed to start container '{container_id}': {e}");
                     std::process::exit(1);
                 }
             }
@@ -111,4 +114,3 @@ fn main() {
         }
     }
 }
-
