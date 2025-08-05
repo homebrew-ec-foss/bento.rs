@@ -10,15 +10,19 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::config::Config;
 fn get_rootfs(container_id: &str) -> Result<(PathBuf, PathBuf)> {
-    let home = std::env::var("HOME")?;
-    let rootfs = PathBuf::from(format!("{home}/.local/share/bento/{container_id}/rootfs"));
+    let config = Config::new_config();
+    let rootfs = PathBuf::from(&config.unwrap().root_path).join(format!("{container_id}/rootfs"));
+
+    println!("{:?}", &rootfs);
 
     fs::create_dir_all(&rootfs).context("Failed to create the rootfs directory.")?;
-
     let old_root = rootfs.join("old_root");
-    fs::create_dir_all(&old_root).context("Failed to create old_root directory")?;
-
+    if let Err(e) = fs::create_dir_all(&old_root) {
+        let _ = fs::remove_dir_all(&rootfs);
+        return Err(e).context("Failed to create old_root - cleared rootfs.");
+    }
     Ok((rootfs, old_root))
 }
 
@@ -36,7 +40,7 @@ pub fn prepare_rootfs(container_id: &str) -> Result<PathBuf> {
     .context("Failed to make root mount tree private")?;
 
     if container_id.contains("..") || container_id.contains('/') {
-        return Err(anyhow::anyhow!("Invalid container_id: {}", container_id));
+        return Err(anyhow::anyhow!("Invalid container_id: {container_id}"));
     }
 
     let (rootfs, old_root) = get_rootfs(container_id)?;
@@ -51,17 +55,47 @@ pub fn prepare_rootfs(container_id: &str) -> Result<PathBuf> {
         None::<&str>,
     )
     .context("Failed to bind mount rootfs")?;
-
     // Phase 3: Mount pseudo-filesystems with rootless-aware strategies
-    rootless_mount_proc(&rootfs)?;
-    rootless_mount_sys(&rootfs)?;
-    rootless_mount_dev(&rootfs)?;
+    let proc_result = rootless_mount_proc(&rootfs).is_ok();
+    let sys_result = rootless_mount_sys(&rootfs).is_ok();
+    let dev_result = rootless_mount_dev(&rootfs).is_ok();
+    if !proc_result || !sys_result || !dev_result {
+        let _ = umount2(&rootfs, MntFlags::MNT_DETACH);
+        if proc_result {
+            let _ = umount2(&rootfs.join("proc"), MntFlags::MNT_DETACH);
+        }
+        if sys_result {
+            let _ = umount2(&rootfs.join("sys"), MntFlags::MNT_DETACH);
+        }
+        if dev_result {
+            let _ = umount2(&rootfs.join("dev"), MntFlags::MNT_DETACH);
+        }
 
+        return Err(anyhow::anyhow!(
+            "Failed to mount proc : {proc_result} \n sys : {sys_result} \n dev : {dev_result}"
+        ));
+    }
     // Phase 4: Switch to container filesystem
     println!("[Init] Executing pivot_root");
-    unistd::pivot_root(&rootfs, &old_root).context("pivot_root failed in rootless container")?;
+    let pivot_result = unistd::pivot_root(&rootfs, &old_root);
 
-    unistd::chdir("/").context("Failed to chdir to new root")?;
+    let chdir_result = if pivot_result.is_ok() {
+        unistd::chdir("/")
+    } else {
+        pivot_result
+    };
+
+    if let Err(e) = chdir_result {
+        let _ = umount2(&rootfs, MntFlags::MNT_DETACH);
+        let _ = umount2(&rootfs.join("proc"), MntFlags::MNT_DETACH);
+        let _ = umount2(&rootfs.join("sys"), MntFlags::MNT_DETACH);
+        let _ = umount2(&rootfs.join("dev"), MntFlags::MNT_DETACH);
+        let _ = fs::remove_dir_all(&rootfs);
+        let _ = fs::remove_dir_all(&old_root);
+        return Err(e).context(
+            "Failed to change the root dir, unmounted complete rootfs and removed rootfs.",
+        );
+    };
 
     // Phase 5: Clean up old root
     cleanup_old_root()?;
@@ -86,9 +120,8 @@ fn rootless_mount_proc(rootfs: &Path) -> Result<()> {
             Ok(())
         }
         Err(e) => {
-            println!("[Init - Mount failed] /proc mount failed: {e}, creating minimal structure");
-            create_proc_structure(&proc_path)?;
-            Ok(())
+            println!("fs failed");
+            Err(anyhow::anyhow!("Failed to mount fs : {e}"))
         }
     }
 }
@@ -105,15 +138,10 @@ fn rootless_mount_sys(rootfs: &Path) -> Result<()> {
         return Ok(());
     }
 
-    // Strategy 2: Mount tmpfs and populate with essential directories
-    if mount_tmpfs_sys(&sys_path).is_ok() {
-        println!("[Init] /sys mounted as populated tmpfs");
-        return Ok(());
+    // Here we are trying to bind mount host /sysfs
+    if bind_mount_host_sys(&sys_path).is_err() {
+        println!("[Init] Bind mounted host's /sys successfully");
     }
-
-    // Strategy 3 : Fall back : Creating sub directories
-    create_sys_directories(&sys_path)?;
-    println!("[Init] Created populated /sys directory structure (fallback)");
     Ok(())
 }
 
@@ -129,128 +157,26 @@ fn mount_sysfs(sys_path: &Path) -> Result<()> {
     .context("Real sysfs mount failed")
 }
 
-// This func to mount the tmpfs sys dir
-fn mount_tmpfs_sys(sys_path: &Path) -> Result<()> {
-    /*
-        mount(
-            Some("tmpfs"),
-            sys_path,
-            Some("tmpfs"),
-            MsFlags::MS_RDONLY | MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
-            Some("size=2M,mode=755"),
-            ).context("Failed to mount tmpfs for /sys")?;
-    */
+// Bind mounting host's /sys
+fn bind_mount_host_sys(sys_path: &Path) -> Result<()> {
+    println!("[Init] Attempting bind mount of host /sys");
 
-    // Temporarily remount as writable to populate, then make read-only
-    mount(
-        None::<&str>,
+    match mount(
+        Some("/sys"),
         sys_path,
         None::<&str>,
-        MsFlags::MS_REMOUNT | MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
-        Some("size=2M,mode=755"),
-    )?;
-
-    // Creating the essential sub directories and files in tmpfs sys
-    add_dir_tmpfs_sys(sys_path)?;
-
-    // Make the mount read-only again
-    mount(
+        MsFlags::MS_BIND | MsFlags::MS_REC,
         None::<&str>,
-        sys_path,
-        None::<&str>,
-        MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY | MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
-        Some("size=2M,mode=755"),
-    )?;
-
-    Ok(())
-}
-
-fn add_dir_tmpfs_sys(sys_path: &Path) -> Result<()> {
-    let essential_dirs = [
-        "kernel",
-        "fs",
-        "class",
-        "devices",
-        "bus",
-        "firmware",
-        "class/net",
-        "class/block",
-        "class/tty",
-    ];
-
-    for dir in &essential_dirs {
-        fs::create_dir_all(sys_path.join(dir))?;
-    }
-
-    let essential_files = [
-        ("kernel/version", "5.15.0-container #1 SMP Container Kernel"),
-        ("kernel/osrelease", "5.15.0-container"),
-        ("kernel/hostname", "container"),
-        (
-            "fs/cgroup/memory/memory.limit_in_bytes",
-            "9223372036854775807",
-        ),
-        ("fs/cgroup/memory/memory.usage_in_bytes", "134217728"),
-        ("class/net/lo/operstate", "up"),
-        ("devices/system/cpu/online", "0-3"),
-    ];
-
-    for (file_path, content) in &essential_files {
-        let full_path = sys_path.join(file_path);
-
-        // Create parent directories if needed
-        if let Some(parent) = full_path.parent() {
-            fs::create_dir_all(parent)?;
+    ) {
+        Ok(_) => {
+            println!("[Init] Bind mount of host /sys successfully");
+            Ok(())
         }
-
-        fs::write(&full_path, content)?;
-    }
-
-    println!("[Init] Created the essential sub directories and file in tmpfs /sys.");
-    Ok(())
-}
-
-fn create_sys_directories(sys_path: &Path) -> Result<()> {
-    // Same structure as tmpfs but on regular filesystem
-    let essential_dirs = [
-        "kernel",
-        "fs",
-        "class",
-        "devices",
-        "bus",
-        "firmware",
-        "class/net",
-        "class/block",
-        "class/tty",
-    ];
-
-    for dir in &essential_dirs {
-        fs::create_dir_all(sys_path.join(dir))?;
-    }
-
-    let essential_files = [
-        ("kernel/version", "5.15.0-container #1 SMP Container Kernel"),
-        ("kernel/osrelease", "5.15.0-container"),
-        ("kernel/hostname", "container"),
-        (
-            "fs/cgroup/memory/memory.limit_in_bytes",
-            "9223372036854775807",
-        ),
-        ("class/net/lo/operstate", "up"),
-    ];
-
-    for (file_path, content) in &essential_files {
-        let full_path = sys_path.join(file_path);
-
-        if let Some(parent) = full_path.parent() {
-            fs::create_dir_all(parent)?;
+        Err(e) => {
+            println!("[Init] Bind mount of /sys failed: {e}");
+            Err(e.into())
         }
-
-        fs::write(&full_path, content)?;
     }
-
-    println!("[Init] Created essential sub directories and file for /sys directory");
-    Ok(())
 }
 
 fn rootless_mount_dev(rootfs: &Path) -> Result<()> {
@@ -281,7 +207,6 @@ fn rootless_mount_dev(rootfs: &Path) -> Result<()> {
             create_rootless_dev_structure(&dev_path)?;
         }
     }
-
     Ok(())
 }
 
@@ -378,49 +303,22 @@ fn create_dev_symlinks(dev_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn create_proc_structure(proc_path: &Path) -> Result<()> {
-    let dirs = ["self", "sys", "net"];
-    for dir in &dirs {
-        fs::create_dir_all(proc_path.join(dir))?;
-    }
-
-    fs::write(proc_path.join("version"), "Container Linux version\n")?;
-    fs::write(proc_path.join("uptime"), "1.0 1.0\n")?;
-
-    Ok(())
-}
-/*
-fn create_minimal_sysfs_structure(sys_path: &Path) -> Result<()> {
-    let basic_dirs = ["kernel", "fs", "dev", "class", "bus", "devices"];
-
-    for dir in &basic_dirs {
-        let dir_path = sys_path.join(dir);
-        fs::create_dir_all(&dir_path)
-            .with_context(|| format!("Failed to create sys/{}", dir))?;
-    }
-
-    let kernel_path = sys_path.join("kernel");
-    let version_path = kernel_path.join("version");
-    if let Err(e) = fs::write(&version_path, "Container Kernel\n") {
-        println!("[Mount] Warning: Failed to create kernel version file: {}", e);
-    }
-
-    Ok(())
-}
-*/
-
 fn cleanup_old_root() -> Result<()> {
     println!("[Init] Cleaning up old root");
 
     match umount2("/old_root", MntFlags::MNT_DETACH) {
         Ok(_) => println!("[Init] Old root unmounted"),
-        Err(e) => println!("[Init] Warning: Failed to unmount old root: {e}"),
+        Err(e) => {
+            println!("[Init] Warning: Failed to unmount old root: {e}");
+            if let Err(new) = umount2("/old_root", MntFlags::MNT_DETACH | MntFlags::MNT_FORCE) {
+                return Err(new).context("Failed to unmount old root : {new}");
+            } else {
+                match fs::remove_dir_all("/old_root") {
+                    Ok(_) => println!("[Init] Old root directory removed"),
+                    Err(e) => println!("[Init] Warning: Failed to remove old root: {e}"),
+                }
+            }
+        }
     }
-
-    match fs::remove_dir_all("/old_root") {
-        Ok(_) => println!("[Init] Old root directory removed"),
-        Err(e) => println!("[Init] Warning: Failed to remove old root: {e}"),
-    }
-
     Ok(())
 }

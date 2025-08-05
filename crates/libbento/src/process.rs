@@ -1,5 +1,6 @@
 // crates/libbento/src/process.rs
 
+use crate::config::Config;
 use crate::fs;
 use crate::syscalls::{
     disable_setgroups_for_child, fork_intermediate, map_user_namespace_rootless,
@@ -36,28 +37,6 @@ impl SyncSignal {
 
     fn as_char(&self) -> char {
         self.as_byte() as char
-    }
-}
-
-pub struct Config {
-    pub root_path: String,
-    pub args: Vec<String>,
-    pub hostname: String,
-    pub rootless: bool,
-    pub bundle_path: String,
-    pub container_id: String,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            root_path: "/tmp/bento-rootfs".to_string(),
-            args: vec!["/bin/cat".to_string(), "/proc/self/stat".to_string()],
-            hostname: "bento-container".to_string(),
-            rootless: true,
-            bundle_path: ".".to_string(),
-            container_id: "default".to_string(),
-        }
     }
 }
 

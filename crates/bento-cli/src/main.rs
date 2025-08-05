@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand, ValueHint};
-use libbento::process::{Config, create_container};
+use libbento::{config::Config, process::create_container};
 use log::info;
 use std::path::PathBuf;
 
@@ -58,10 +58,17 @@ fn main() {
                 bundle.display()
             );
 
-            let config = Config::default(); // TODO: Load from bundle/config.json
+            //let config = Config::default(); // TODO: Load from bundle/config.json
 
-            if let Err(e) = create_container(&config) {
-                eprintln!("Container creation failed: {e}");
+            match Config::new_config() {
+                Ok(config) => {
+                    if let Err(e) = create_container(&config) {
+                        eprintln!("Container creation failed: {e}");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Container creation failed: {e}");
+                }
             }
         }
         Commands::Start { container_id } => {
