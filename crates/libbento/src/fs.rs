@@ -86,9 +86,8 @@ fn rootless_mount_proc(rootfs: &Path) -> Result<()> {
             Ok(())
         }
         Err(e) => {
-            println!("[Init - Mount failed] /proc mount failed: {e}, creating minimal structure");
-            create_proc_structure(&proc_path)?;
-            Ok(())
+            println!("fs failed");
+            return Err(anyhow::anyhow!("Failed to mount fs : {}", e));
         }
     }
 }
@@ -377,37 +376,6 @@ fn create_dev_symlinks(dev_path: &Path) -> Result<()> {
     }
     Ok(())
 }
-
-fn create_proc_structure(proc_path: &Path) -> Result<()> {
-    let dirs = ["self", "sys", "net"];
-    for dir in &dirs {
-        fs::create_dir_all(proc_path.join(dir))?;
-    }
-
-    fs::write(proc_path.join("version"), "Container Linux version\n")?;
-    fs::write(proc_path.join("uptime"), "1.0 1.0\n")?;
-
-    Ok(())
-}
-/*
-fn create_minimal_sysfs_structure(sys_path: &Path) -> Result<()> {
-    let basic_dirs = ["kernel", "fs", "dev", "class", "bus", "devices"];
-
-    for dir in &basic_dirs {
-        let dir_path = sys_path.join(dir);
-        fs::create_dir_all(&dir_path)
-            .with_context(|| format!("Failed to create sys/{}", dir))?;
-    }
-
-    let kernel_path = sys_path.join("kernel");
-    let version_path = kernel_path.join("version");
-    if let Err(e) = fs::write(&version_path, "Container Kernel\n") {
-        println!("[Mount] Warning: Failed to create kernel version file: {}", e);
-    }
-
-    Ok(())
-}
-*/
 
 fn cleanup_old_root() -> Result<()> {
     println!("[Init] Cleaning up old root");
