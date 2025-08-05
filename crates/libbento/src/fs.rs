@@ -87,7 +87,7 @@ fn rootless_mount_proc(rootfs: &Path) -> Result<()> {
         }
         Err(e) => {
             println!("fs failed");
-            return Err(anyhow::anyhow!("Failed to mount fs : {}", e));
+            Err(anyhow::anyhow!("Failed to mount fs : {}", e))
         }
     }
 }
