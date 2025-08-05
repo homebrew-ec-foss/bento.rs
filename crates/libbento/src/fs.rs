@@ -98,7 +98,7 @@ fn populate_manual_binaries(rootfs: &Path) -> Result<()> {
         std::fs::create_dir_all(dir)?;
     }
 
-    println!("[Rootfs] Using manual binary population method");
+    println!("[Init] Using manual binary population method");
 
     // Essential Unix utilities with their typical locations
     let essential_binaries = [
@@ -126,22 +126,22 @@ fn populate_manual_binaries(rootfs: &Path) -> Result<()> {
             match std::fs::copy(source, dest) {
                 Ok(_) => {
                     std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o755))?;
-                    println!("[Rootfs] Copied binary: {} -> {}", source, dest.display());
+                    println!("[Init] Copied binary: {} -> {}", source, dest.display());
                     successful_copies += 1;
                 }
                 Err(e) => {
-                    println!("[Rootfs] Warning: Failed to copy {source}: {e}");
+                    println!("[Init] Warning: Failed to copy {source}: {e}");
                 }
             }
         } else {
-            println!("[Rootfs] Warning: {source} not found on host");
+            println!("[Init] Warning: {source} not found on host");
         }
     }
 
     // Copy shared libraries (essential for dynamic binaries)
     copy_shared_libraries(&lib_dir, &lib64_dir)?;
 
-    println!("[Rootfs] Manual population complete: {successful_copies} binaries copied");
+    println!("[Init] Manual population complete: {successful_copies} binaries copied");
     Ok(())
 }
 
@@ -150,7 +150,7 @@ fn populate_busybox_binaries(rootfs: &Path) -> Result<()> {
     let bin_dir = rootfs.join("bin");
     std::fs::create_dir_all(&bin_dir)?;
 
-    println!("[Rootfs] Using BusyBox static binary method");
+    println!("[Init] Using BusyBox static binary method");
 
     // Look for BusyBox in multiple locations
     let busybox_locations = [
@@ -179,7 +179,7 @@ fn populate_busybox_binaries(rootfs: &Path) -> Result<()> {
     let busybox_dest = bin_dir.join("busybox");
     std::fs::copy(busybox_path, &busybox_dest)?;
     std::fs::set_permissions(&busybox_dest, std::fs::Permissions::from_mode(0o755))?;
-    println!("[Rootfs] Copied BusyBox binary: {}", busybox_dest.display());
+    println!("[Init] Copied BusyBox binary: {}", busybox_dest.display());
 
     // Create comprehensive command symlinks
     let busybox_commands = [
@@ -206,15 +206,15 @@ fn populate_busybox_binaries(rootfs: &Path) -> Result<()> {
         match std::os::unix::fs::symlink("busybox", &link_path) {
             Ok(()) => {
                 created_commands += 1;
-                println!("[Rootfs] Created command symlink: {cmd}");
+                //println!("[Init] Created command symlink: {cmd}");
             }
             Err(e) => {
-                println!("[Rootfs] Warning: Failed to create symlink for {cmd}: {e}");
+                println!("[Init] Warning: Failed to create symlink for {cmd}: {e}");
             }
         }
     }
-
-    println!("[Rootfs] BusyBox setup complete: {created_commands} commands available");
+    create_minimal_passwd(rootfs)?;
+    println!("[Init] BusyBox setup complete: {created_commands} commands available");
     Ok(())
 }
 
@@ -311,7 +311,7 @@ fn copy_shared_libraries(lib_dir: &Path, lib64_dir: &Path) -> Result<()> {
     for (source_path, target_base) in essential_libraries {
         let source = Path::new(source_path);
         if !source.exists() {
-            println!("[Rootfs] Library {source_path} not found, skipping");
+            println!("[Init] Library {source_path} not found, skipping");
             continue;
         }
 
@@ -329,10 +329,10 @@ fn copy_shared_libraries(lib_dir: &Path, lib64_dir: &Path) -> Result<()> {
                 let mut perms = fs::metadata(&target_file)?.permissions();
                 perms.set_mode(0o755);
                 fs::set_permissions(&target_file, perms)?;
-                println!("[Rootfs] Copied library: {}", target_file.display());
+                println!("[Init] Copied library: {}", target_file.display());
             }
             Err(e) => {
-                println!("[Rootfs] Warning: Failed to copy library {source_path}: {e}");
+                println!("[Init] Warning: Failed to copy library {source_path}: {e}");
             }
         }
     }
@@ -681,3 +681,15 @@ fn cleanup_old_root() -> Result<()> {
 
     Ok(())
 }
+
+fn create_minimal_passwd(rootfs: &Path) -> Result<()> {
+    let etc_dir = rootfs.join("etc");
+    fs::create_dir_all(&etc_dir)?;
+
+    let passwd_content = "root:x:0:0:root:/:/bin/sh\n";  // Maps UID 0 to "root"
+    fs::write(etc_dir.join("passwd"), passwd_content)?;
+    //println!("[Init] Created minimal /etc/passwd for identity resolution");
+
+    Ok(())
+}
+

@@ -8,10 +8,9 @@ use crate::syscalls::{
 use anyhow::{Context, Result, anyhow};
 use nix::sys::signal::{Signal, kill};
 use nix::sys::stat::Mode;
-use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
+use nix::sys::wait::{WaitStatus, waitpid};
 use nix::unistd::{ForkResult, Pid, fork, getpid, mkfifo, pipe, read, write};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::fs as std_fs;
 use std::os::unix::io::{AsRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
@@ -129,14 +128,37 @@ impl Default for Config {
         Self {
             root_path: "/tmp/bento-rootfs".to_string(),
 
+	    //args: vec!["/bin/sh".to_string(), "-c".to_string(), "echo '=== Bento.rs Demo: Isolation Showcase ===' && echo 'Kernel Info:' && uname -a && echo 'Hostname:' && hostname && echo 'User Info:' && whoami && id && echo 'Namespace Files:' && ls /proc/self/ns && echo 'UID Mapping:' && cat /proc/self/uid_map && echo 'Process Tree:' && ps aux && echo 'Mount Points:' && cat /proc/mounts && echo 'Environment:' && env && echo '=== End Demo: Functional Container Achieved! ==='".to_string()],
+
+	/*args: vec!["/bin/sh".to_string(), "-c".to_string(), 
+    "echo '=== Bento.rs Demo: Isolation Showcase ===' && \
+    echo 'Kernel Info:' && uname -a && \
+    echo 'Hostname:' && hostname && \
+    echo 'User Info:' && whoami && id && \
+    echo 'Namespace Files:' && ls /proc/self/ns && \
+    echo 'UID Mapping:' && cat /proc/self/uid_map && \
+    echo 'Process Tree:' && ps aux && \
+    echo 'Mount Points:' && cat /proc/mounts && \
+    echo 'Environment:' && env && \
+    echo '=== End Demo: Functional Container Achieved! ==='".to_string()],
+*/
+
+args: vec!["/bin/sh".to_string(), "-c".to_string(), 
+    "echo '=== Bento.rs Demo: Isolation Showcase ===' && \
+    echo -n 'Kernel Info: ' && uname -a && \
+    echo -n 'Hostname: ' && hostname && \
+    echo -n 'User Info: ' && whoami && echo -n 'ID: ' && id && \
+    echo -n 'Namespace Files: ' && ls /proc/self/ns && \
+    echo -n 'UID Mapping: ' && cat /proc/self/uid_map && \
+    echo -n 'Process Tree: ' && ps aux && \
+    echo -n 'Mount Points: ' && cat /proc/mounts && \
+    echo '=== End Demo: Functional Container Achieved! ==='".to_string()],
+
+
             //args: vec!["/bin/sh".to_string(), "-c".to_string(), "cat /proc/meminfo | head -5 && echo 'System info accessible'".to_string()],
             //args: vec!["/bin/sh".to_string(), "-c".to_string(), "env | sort && echo 'PATH:' $PATH".to_string()],
             //args: vec!["/bin/sh".to_string(), "-c".to_string(), "ls -la /bin | head -10 && echo 'Filesystem test complete'".to_string()],
-            args: vec![
-                "/bin/sh".to_string(),
-                "-c".to_string(),
-                "ps aux && echo 'Process count:' $(ps aux | wc -l)".to_string(),
-            ],
+            //args: vec![ "/bin/sh".to_string(), "-c".to_string(), "ps aux && echo 'Process count:' $(ps aux | wc -l)".to_string(), ],
             //args: vec!["/bin/sh".to_string(), "-c".to_string(), "uname -a && hostname && echo 'Working directory:' $(pwd)".to_string()],
             /*
             args: vec!["/bin/sh".to_string(), "-c".to_string(),
@@ -327,7 +349,7 @@ fn orchestrator_handler(bridge_pid: Pid, pipes: OrchestratorPipes, config: &Conf
     println!("[Orchestrator] Waiting for bridge process to exit...");
 
     // Use non-blocking wait first to check status
-    match waitpid(bridge_pid, Some(WaitPidFlag::WNOHANG)) {
+    /*match waitpid(bridge_pid, Some(WaitPidFlag::WNOHANG)) {
         Ok(WaitStatus::Exited(pid, status)) => {
             println!(
                 "[Orchestrator] Bridge {} already exited with status {}",
@@ -372,8 +394,27 @@ fn orchestrator_handler(bridge_pid: Pid, pipes: OrchestratorPipes, config: &Conf
         _ => {
             println!("[Orchestrator] Bridge in unexpected state");
         }
-    }
+    }*/
 
+match waitpid(bridge_pid, None) {
+    Ok(WaitStatus::Exited(pid, status)) => {
+        println!("[Orchestrator] Bridge {} exited with status {}", pid, status);
+        if status != 0 {
+            return Err(anyhow!("[Orchestrator] Bridge exited with non-zero status {}", status));
+        }
+    }
+    Err(nix::errno::Errno::ECHILD) => {  //  Treat as success: child already reaped
+        println!("[Orchestrator] Bridge already exited and reaped (ECHILD) - normal for fast exits");
+    }
+    Err(e) => {
+        return Err(anyhow!("[Orchestrator] Bridge wait failed: {}", e));
+    }
+    _ => {
+        println!("[Orchestrator] Unexpected bridge status");
+    }
+}
+
+// Ensure the rest of the function proceeds only if no errors occurred earlier
     println!(
         "[Orchestrator] Container '{}' created successfully (status: created)",
         config.container_id
@@ -477,7 +518,7 @@ fn create_init_with_start_pipe(config: &Config, pipes: &BridgePipes) -> isize {
 fn init_handler_with_pause(config: &Config, _start_pipe_fd: i32) -> isize {
     println!("[Init] I am PID 1 in container: {}", getpid());
     println!("[Init] Container ID: {}", config.container_id);
-    println!("[Init] Command to execute: {:?}", config.args);
+    //println!("[Init] Command to execute: {:?}", config.args);
 
     // Phase 1: Filesystem preparation with validation
     match fs::prepare_rootfs(&config.container_id, config) {
@@ -485,8 +526,8 @@ fn init_handler_with_pause(config: &Config, _start_pipe_fd: i32) -> isize {
             println!("[Init] Filesystem prepared successfully");
 
             // Validate that commands exist after rootfs preparation
-            println!("[Init] Validating command availability:");
-            for (i, arg) in config.args.iter().enumerate() {
+            //println!("[Init] Validating command availability:");
+            /*for (i, arg) in config.args.iter().enumerate() {
                 if i == 0 {
                     // Only check the main command, not arguments
                     if Path::new(arg).exists() {
@@ -505,7 +546,7 @@ fn init_handler_with_pause(config: &Config, _start_pipe_fd: i32) -> isize {
                         }
                     }
                 }
-            }
+            }*/
         }
         Err(e) => {
             eprintln!("[Init] Filesystem preparation failed: {}", e);
@@ -686,7 +727,7 @@ fn set_container_hostname(hostname: &str) -> Result<()> {
         }
     }
 }
-
+/*
 fn debug_namespace_info() -> Result<()> {
     use std::fs;
 
@@ -719,7 +760,7 @@ fn debug_namespace_info() -> Result<()> {
 
     Ok(())
 }
-
+*/
 fn exec_user_command(config: &Config) -> isize {
     use nix::unistd::execvp;
     use std::ffi::CString;
@@ -884,6 +925,8 @@ fn read_start_signal(pipe_path: &str) -> Result<()> {
     Ok(())
 }
 */
+
+/*
 // FIXED: Robust write with amount verification
 fn send_start_signal(pipe_path: &str) -> Result<()> {
     use std::io::Write;
@@ -901,7 +944,7 @@ fn send_start_signal(pipe_path: &str) -> Result<()> {
     println!("[Start] Successfully sent complete start signal");
     Ok(())
 }
-
+*/
 pub fn cleanup_named_pipes(container_id: &str) -> Result<()> {
     let home = std::env::var("HOME").context("HOME environment variable not set")?;
 
