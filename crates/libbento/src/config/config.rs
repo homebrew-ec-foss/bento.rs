@@ -1,3 +1,4 @@
+use serde::Serialize;
 use serde::Deserialize;
 use serde_with::{serde_as, DisplayFromStr};
 use std::{
@@ -19,6 +20,18 @@ pub enum ConfigError {
     Invalid(String),
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NamespaceType {
+    Pid,
+    Net,
+    Mnt,
+    Uts,
+    Ipc,
+    User,
+    Cgroup,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RawConfig {
@@ -37,9 +50,6 @@ pub struct RawConfig {
    #[serde(default)]
    pub linux: Option<Linux>,
    
-   #[serde(default)]
-   pub runtime: Option<RuntimeConfig>,
-   
    #[serde(flatten)]
    pub extra: HashMap<String, serde_json::Value>, // This is helpful when unknown fields are received, without this runtime throws errors.
 }
@@ -51,19 +61,13 @@ pub struct Config {
    pub process : Option<Process>,
    pub  mounts : Vec<Mount>,
    pub hostname : Option<String>,
-   pub linux : LinuxConfig, // it was Option<Linux>
-   pub runtime : RuntimeConfig,
+   pub linux : Linux, // it was Option<Linux>
    pub extra : HashMap<String, serde_json::Value>,
 }
 
 #[derive(Debug)]
 pub struct OciVersion(#[allow(dead_code)]String);
 // without adding this dead_code, just a warning for not using OciVersion.
-
-#[derive(Debug)]
-pub enum LinuxConfig {
-      Rootless {linux : Linux, uid_mappings : Vec<IDMap>, gid_mappings : Vec<IDMap> }
-}
 
 #[serde_as]
 #[derive(Debug, Deserialize)]
@@ -119,7 +123,7 @@ pub struct IDMap {
 #[derive(Debug, Deserialize)]
 pub struct Namespace {
     #[serde(rename = "type")]
-    pub ns_type: String,
+    pub ns_type: NamespaceType,
     #[serde(default)]
     pub path: Option<PathBuf>,
 }
@@ -143,15 +147,6 @@ pub struct Cpu {
     #[serde(default)]
     pub shares: Option<u64>,
 }
-
-#[serde_as]
-#[derive(Debug, Deserialize, Default)]
-pub struct RuntimeConfig {
-    #[serde(default = "RuntimeConfig::default_pivot_root")]
-    pub pivot_root: bool,
-}
-
-impl RuntimeConfig { fn default_pivot_root() -> bool { true } }
 
 // THis will impl serde's deserialize on config
 impl<'de> Deserialize<'de> for Config {
@@ -183,21 +178,13 @@ impl<'de> Deserialize<'de> for Config {
             return Err(serde::de::Error::custom("Missing gid 0 mapping"));
         }
 
-        let uid_mappings = linux.uid_mappings.clone();
-        let gid_mappings = linux.gid_mappings.clone();
-
         Ok(Config {
             oci_version: OciVersion(raw.oci_version),
-            linux: LinuxConfig::Rootless {
-                linux,
-                uid_mappings: uid_mappings,
-                gid_mappings: gid_mappings,
-            },
+            linux,
             root : raw.root,
             process : raw.process,
             mounts : raw.mounts,
             hostname : raw.hostname,
-            runtime : raw.runtime.unwrap_or_default(),
             extra: raw.extra
         })
     }

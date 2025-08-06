@@ -1,7 +1,7 @@
 {
-  "ociVersion": "1.0.2",
+  "ociVersion": "1.0.3",
   "root": {
-    "path": "/home/kali/Documents/bento.rs/examples/busybox/rootfs",
+    "path": "rootfs",
     "readonly": false
   },
   "hostname": "bento-test",
@@ -16,7 +16,7 @@
     {
       "destination": "/",
       "type": "bind",
-      "source": "/home/kali/Documents/bento.rs/examples/busybox/rootfs",
+      "source": "rootfs",
       "options": ["rbind", "rw"]
     },
     {
@@ -42,15 +42,8 @@
     ],
     "namespaces": [
       { "type": "pid" },
-      { "type": "mount" },
+      { "type": "net" },
       { "type": "uts" }
-    ],
-    "network": {
-      "mode": "slirp"
-    }
-  },
-
-  "runtime": {
-    "pivotRoot": true
+    ]
   }
 }
