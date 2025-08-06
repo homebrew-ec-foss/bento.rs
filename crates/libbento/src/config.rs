@@ -11,7 +11,7 @@ pub struct RootConfig {
 }
 
 pub fn load_config(container_id: &str) -> Result<Config> {
-    let root_path = format!("/run/container/{}/rootfs", container_id);
+    let root_path = format!("/run/container/{container_id}/rootfs");
     Ok(Config {
         root: RootConfig { path: root_path },
     })
