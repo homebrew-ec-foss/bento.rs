@@ -4,33 +4,31 @@ use nix::{
     sys::stat::{Mode, SFlag, mknod},
     unistd,
 };
+use serde_json;
 use std::{
     ffi::CString,
     fs,
     path::{Path, PathBuf},
 };
-use serde_json;
 
-fn get_rootfs(container_id : &str) -> Result<(PathBuf, PathBuf)> {
-
+fn get_rootfs(container_id: &str) -> Result<(PathBuf, PathBuf)> {
     let config_path = PathBuf::from(format!("/run/container/{container_id}/config.json"));
     let config_content = fs::read_to_string(&config_path)?;
-    let config : serde_json::Value = serde_json::from_str(&config_content)?;
- 
+    let config: serde_json::Value = serde_json::from_str(&config_content)?;
     let rootfs_path = match config["root"]["path"].as_str() {
         Some(path) => path,
-        None => return Err(anyhow::anyhow!("Missing or invalid root.path in config.json in {container_id}."))
+        None => {
+            return Err(anyhow::anyhow!(
+                "Missing or invalid root.path in config.json in {container_id}."
+            ));
+        }
     };
-
     let rootfs = PathBuf::from(rootfs_path);
-    
     fs::create_dir_all(&rootfs).context("Failed to create the rootfs directory.")?;
- 
     let old_root = rootfs.join("old_root");
-    
     if let Err(e) = fs::create_dir_all(&old_root) {
         let _ = fs::remove_dir_all(&rootfs);
-        return Err(e).context("Failed to create old_root - cleared rootfs.")
+        return Err(e).context("Failed to create old_root - cleared rootfs.");
     }
 
     Ok((rootfs, old_root))
@@ -65,37 +63,28 @@ pub fn prepare_rootfs(container_id: &str) -> Result<PathBuf> {
         None::<&str>,
     )
     .context("Failed to bind mount rootfs")?;
-
     // Phase 3: Mount pseudo-filesystems with rootless-aware strategies
- 
     let proc_result = rootless_mount_proc(&rootfs).is_ok();
     let sys_result = rootless_mount_sys(&rootfs).is_ok();
     let dev_result = rootless_mount_dev(&rootfs).is_ok();
-
-
     if !proc_result || !sys_result || !dev_result {
-
         let _ = umount2(&rootfs, MntFlags::MNT_DETACH);
-        
         if proc_result {
             let _ = umount2(&rootfs.join("proc"), MntFlags::MNT_DETACH);
         }
-
         if sys_result {
             let _ = umount2(&rootfs.join("sys"), MntFlags::MNT_DETACH);
         }
-
         if dev_result {
             let _ = umount2(&rootfs.join("dev"), MntFlags::MNT_DETACH);
         }
 
-        return Err(anyhow::anyhow!("Failed to mount proc : {proc_result} \n sys : {sys_result} \n dev : {dev_result}"))
- 
+        return Err(anyhow::anyhow!(
+            "Failed to mount proc : {proc_result} \n sys : {sys_result} \n dev : {dev_result}"
+        ));
     }
-
     // Phase 4: Switch to container filesystem
     println!("[Init] Executing pivot_root");
-    
     let pivot_result = unistd::pivot_root(&rootfs, &old_root);
 
     let chdir_result = if pivot_result.is_ok() {
@@ -105,16 +94,15 @@ pub fn prepare_rootfs(container_id: &str) -> Result<PathBuf> {
     };
 
     if let Err(e) = chdir_result {
-
         let _ = umount2(&rootfs, MntFlags::MNT_DETACH);
         let _ = umount2(&rootfs.join("proc"), MntFlags::MNT_DETACH);
         let _ = umount2(&rootfs.join("sys"), MntFlags::MNT_DETACH);
         let _ = umount2(&rootfs.join("dev"), MntFlags::MNT_DETACH);
- 
         let _ = fs::remove_dir_all(&rootfs);
         let _ = fs::remove_dir_all(&old_root);
- 
-        return Err(e).context("Failed to change the root dir, unmounted complete rootfs and removed rootfs.")
+        return Err(e).context(
+            "Failed to change the root dir, unmounted complete rootfs and removed rootfs.",
+        );
     };
 
     // Phase 5: Clean up old root
@@ -184,7 +172,6 @@ fn mount_sysfs(sys_path: &Path) -> Result<()> {
 
 // This func to mount the tmpfs sys dir
 fn mount_tmpfs_sys(sys_path: &Path) -> Result<()> {
- 
     // Temporarily remount as writable to populate, then make read-only
     mount(
         None::<&str>,
@@ -195,7 +182,7 @@ fn mount_tmpfs_sys(sys_path: &Path) -> Result<()> {
     )?;
 
     // Creating the essential sub directories and files in tmpfs sys
-    if let Err(e) = add_dir_tmpfs_sys(sys_path){
+    if let Err(e) = add_dir_tmpfs_sys(sys_path) {
         let _ = umount2(sys_path, MntFlags::MNT_DETACH);
         return Err(e).context("Failed to mount tmpfs dirs : Sys");
     }
@@ -442,6 +429,5 @@ fn cleanup_old_root() -> Result<()> {
             }
         }
     }
-    
     Ok(())
 }
