@@ -9,15 +9,29 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
+use serde_json;
 
-fn get_rootfs(container_id: &str) -> Result<(PathBuf, PathBuf)> {
-    let home = std::env::var("HOME")?;
-    let rootfs = PathBuf::from(format!("{home}/.local/share/bento/{container_id}/rootfs"));
+fn get_rootfs(container_id : &str) -> Result<(PathBuf, PathBuf)> {
 
+    let config_path = PathBuf::from(format!("/run/container/{container_id}/config.json"));
+    let config_content = fs::read_to_string(&config_path)?;
+    let config : serde_json::Value = serde_json::from_str(&config_content)?;
+ 
+    let rootfs_path = match config["root"]["path"].as_str() {
+        Some(path) => path,
+        None => return Err(anyhow::anyhow!("Missing or invalid root.path in config.json in {container_id}."))
+    };
+
+    let rootfs = PathBuf::from(rootfs_path);
+    
     fs::create_dir_all(&rootfs).context("Failed to create the rootfs directory.")?;
-
+ 
     let old_root = rootfs.join("old_root");
-    fs::create_dir_all(&old_root).context("Failed to create old_root directory")?;
+    
+    if let Err(e) = fs::create_dir_all(&old_root) {
+        let _ = fs::remove_dir_all(&rootfs);
+        return Err(e).context("Failed to create old_root - cleared rootfs.")
+    }
 
     Ok((rootfs, old_root))
 }
@@ -36,7 +50,7 @@ pub fn prepare_rootfs(container_id: &str) -> Result<PathBuf> {
     .context("Failed to make root mount tree private")?;
 
     if container_id.contains("..") || container_id.contains('/') {
-        return Err(anyhow::anyhow!("Invalid container_id: {}", container_id));
+        return Err(anyhow::anyhow!("Invalid container_id: {container_id}"));
     }
 
     let (rootfs, old_root) = get_rootfs(container_id)?;
@@ -53,15 +67,55 @@ pub fn prepare_rootfs(container_id: &str) -> Result<PathBuf> {
     .context("Failed to bind mount rootfs")?;
 
     // Phase 3: Mount pseudo-filesystems with rootless-aware strategies
-    rootless_mount_proc(&rootfs)?;
-    rootless_mount_sys(&rootfs)?;
-    rootless_mount_dev(&rootfs)?;
+ 
+    let proc_result = rootless_mount_proc(&rootfs).is_ok();
+    let sys_result = rootless_mount_sys(&rootfs).is_ok();
+    let dev_result = rootless_mount_dev(&rootfs).is_ok();
+
+
+    if !proc_result || !sys_result || !dev_result {
+
+        let _ = umount2(&rootfs, MntFlags::MNT_DETACH);
+        
+        if proc_result {
+            let _ = umount2(&rootfs.join("proc"), MntFlags::MNT_DETACH);
+        }
+
+        if sys_result {
+            let _ = umount2(&rootfs.join("sys"), MntFlags::MNT_DETACH);
+        }
+
+        if dev_result {
+            let _ = umount2(&rootfs.join("dev"), MntFlags::MNT_DETACH);
+        }
+
+        return Err(anyhow::anyhow!("Failed to mount proc : {proc_result} \n sys : {sys_result} \n dev : {dev_result}"))
+ 
+    }
 
     // Phase 4: Switch to container filesystem
     println!("[Init] Executing pivot_root");
-    unistd::pivot_root(&rootfs, &old_root).context("pivot_root failed in rootless container")?;
+    
+    let pivot_result = unistd::pivot_root(&rootfs, &old_root);
 
-    unistd::chdir("/").context("Failed to chdir to new root")?;
+    let chdir_result = if pivot_result.is_ok() {
+        unistd::chdir("/")
+    } else {
+        pivot_result
+    };
+
+    if let Err(e) = chdir_result {
+
+        let _ = umount2(&rootfs, MntFlags::MNT_DETACH);
+        let _ = umount2(&rootfs.join("proc"), MntFlags::MNT_DETACH);
+        let _ = umount2(&rootfs.join("sys"), MntFlags::MNT_DETACH);
+        let _ = umount2(&rootfs.join("dev"), MntFlags::MNT_DETACH);
+ 
+        let _ = fs::remove_dir_all(&rootfs);
+        let _ = fs::remove_dir_all(&old_root);
+ 
+        return Err(e).context("Failed to change the root dir, unmounted complete rootfs and removed rootfs.")
+    };
 
     // Phase 5: Clean up old root
     cleanup_old_root()?;
@@ -87,7 +141,7 @@ fn rootless_mount_proc(rootfs: &Path) -> Result<()> {
         }
         Err(e) => {
             println!("fs failed");
-            Err(anyhow::anyhow!("Failed to mount fs : {}", e))
+            Err(anyhow::anyhow!("Failed to mount fs : {e}"))
         }
     }
 }
@@ -130,16 +184,7 @@ fn mount_sysfs(sys_path: &Path) -> Result<()> {
 
 // This func to mount the tmpfs sys dir
 fn mount_tmpfs_sys(sys_path: &Path) -> Result<()> {
-    /*
-        mount(
-            Some("tmpfs"),
-            sys_path,
-            Some("tmpfs"),
-            MsFlags::MS_RDONLY | MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
-            Some("size=2M,mode=755"),
-            ).context("Failed to mount tmpfs for /sys")?;
-    */
-
+ 
     // Temporarily remount as writable to populate, then make read-only
     mount(
         None::<&str>,
@@ -150,7 +195,10 @@ fn mount_tmpfs_sys(sys_path: &Path) -> Result<()> {
     )?;
 
     // Creating the essential sub directories and files in tmpfs sys
-    add_dir_tmpfs_sys(sys_path)?;
+    if let Err(e) = add_dir_tmpfs_sys(sys_path){
+        let _ = umount2(sys_path, MntFlags::MNT_DETACH);
+        return Err(e).context("Failed to mount tmpfs dirs : Sys");
+    }
 
     // Make the mount read-only again
     mount(
@@ -382,13 +430,18 @@ fn cleanup_old_root() -> Result<()> {
 
     match umount2("/old_root", MntFlags::MNT_DETACH) {
         Ok(_) => println!("[Init] Old root unmounted"),
-        Err(e) => println!("[Init] Warning: Failed to unmount old root: {e}"),
+        Err(e) => {
+            println!("[Init] Warning: Failed to unmount old root: {e}");
+            if let Err(new) = umount2("/old_root", MntFlags::MNT_DETACH | MntFlags::MNT_FORCE) {
+                return Err(new).context("Failed to unmount old root : {new}");
+            } else {
+                match fs::remove_dir_all("/old_root") {
+                    Ok(_) => println!("[Init] Old root directory removed"),
+                    Err(e) => println!("[Init] Warning: Failed to remove old root: {e}"),
+                }
+            }
+        }
     }
-
-    match fs::remove_dir_all("/old_root") {
-        Ok(_) => println!("[Init] Old root directory removed"),
-        Err(e) => println!("[Init] Warning: Failed to remove old root: {e}"),
-    }
-
+    
     Ok(())
 }
