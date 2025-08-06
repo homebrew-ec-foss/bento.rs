@@ -4,33 +4,23 @@ use nix::{
     sys::stat::{Mode, SFlag, mknod},
     unistd,
 };
-use serde_json;
 use std::{
     ffi::CString,
     fs,
     path::{Path, PathBuf},
 };
 
+use crate::config;
+
 fn get_rootfs(container_id: &str) -> Result<(PathBuf, PathBuf)> {
-    let config_path = PathBuf::from(format!("/run/container/{container_id}/config.json"));
-    let config_content = fs::read_to_string(&config_path)?;
-    let config: serde_json::Value = serde_json::from_str(&config_content)?;
-    let rootfs_path = match config["root"]["path"].as_str() {
-        Some(path) => path,
-        None => {
-            return Err(anyhow::anyhow!(
-                "Missing or invalid root.path in config.json in {container_id}."
-            ));
-        }
-    };
-    let rootfs = PathBuf::from(rootfs_path);
+    let config = config::load_config(container_id)?;
+    let rootfs = PathBuf::from(&config.root.path);
     fs::create_dir_all(&rootfs).context("Failed to create the rootfs directory.")?;
     let old_root = rootfs.join("old_root");
     if let Err(e) = fs::create_dir_all(&old_root) {
         let _ = fs::remove_dir_all(&rootfs);
         return Err(e).context("Failed to create old_root - cleared rootfs.");
     }
-
     Ok((rootfs, old_root))
 }
 
