@@ -1,10 +1,13 @@
 // crates/libbento/src/process.rs
 
+use crate::config2::load_config;
 use crate::fs;
+use crate::seccomp::SeccompFilter;
 use crate::syscalls::{
     disable_setgroups_for_child, fork_intermediate, map_user_namespace_rootless,
     unshare_remaining_namespaces, unshare_user_namespace,
 };
+
 use anyhow::{Context, Result, anyhow};
 use nix::unistd::Pid;
 use nix::unistd::{ForkResult, fork, getpid, pipe, read, write};
@@ -259,7 +262,42 @@ fn create_init_with_pid_communication(config: &Config, pipes: &BridgePipes) -> i
             println!("[Bridge] Mission complete - exiting");
             0
         }
-        Ok(ForkResult::Child) => init_handler(config),
+        Ok(ForkResult::Child) => {
+            let rootfs = init_handler(config);
+
+            println!("[Init] Starting seccomp setup : ");
+            match load_config(&config.container_id) {
+                Ok(seccomp_config) => {
+                    let filter = SeccompFilter::new(seccomp_config);
+                    if let Err(e) = filter.apply() {
+                        eprintln!("[Init] Failed to apply seccomp filter: {}", e);
+                        unsafe { libc::_exit(1) };
+                    }
+                    println!("[Init] seccomp filter setup successful.");
+                }
+                Err(e) => {
+                    eprintln!("[Init] Failed to load seccomp config: {}", e);
+                    unsafe { libc::_exit(1) };
+                }
+            }
+            println!("[Init] seccomp filter setup successful.");
+            println!("[TEST] Attempting blocked syscall (ptrace)");
+            unsafe {
+                let result = libc::ptrace(0, 0, 0, 0);
+                if result == -1 {
+                    println!(
+                        "
+                         [TEST] Running blocked syscall (ptrace) : {}",
+                        std::io::Error::last_os_error()
+                    );
+                } else {
+                    println!("[TEST] Running blocked syscall (ptrace) : {}", result);
+                }
+            }
+            println!("Seccomp setup successful.");
+            println!("[Init] Container is ready for actual workloads");
+            rootfs
+        }
         Err(e) => {
             eprintln!("[Bridge] Failed to fork init process: {e}");
             1
