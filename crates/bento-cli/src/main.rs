@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand, ValueHint};
-use libbento::process::{Config, create_container};
-use log::info;
+use libbento::process::{Config as ProcessConfig, create_container};
+use libbento::config::Config as OciConfig;           
+use log::{info, error};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -40,6 +41,7 @@ pub enum Commands {
 }
 
 fn main() {
+    env_logger::init();
     info!("Starting Bento CLI");
 
     let args = Cli::parse();
@@ -52,16 +54,32 @@ fn main() {
             container_id,
             bundle,
         } => {
-            println!(
-                "Creating container '{}' with bundle '{}'",
-                container_id,
-                bundle.display()
-            );
+            let cfg_path = bundle.join("config.json");
+            match OciConfig::load(&cfg_path) {
+                Ok(cfg) => {
+                    println!(
+                        "Container '{}' validated. rootfs = {}",
+                        container_id,
+                        cfg.root.path.display()
+                    );
+                    println!(
+                        "Creating container '{}' with bundle '{}'",
+                        container_id,
+                        bundle.display()
+                    );
 
-            let config = Config::default(); // TODO: Load from bundle/config.json
+                    // Here we make a ProcessConfig from the OCI config
+                    let process_config = ProcessConfig::default(); 
+                    // TODO: convert `cfg` to `process_config` if needed
 
-            if let Err(e) = create_container(&config) {
-                eprintln!("Container creation failed: {e}");
+                    if let Err(e) = create_container(&process_config) {
+                        eprintln!("Container creation failed: {e}");
+                    }
+                }
+                Err(e) => {
+                    error!("Invalid bundle: {}", e);
+                    std::process::exit(1);
+                }
             }
         }
         Commands::Start { container_id } => {
