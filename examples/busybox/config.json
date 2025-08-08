@@ -1,0 +1,49 @@
+{
+  "ociVersion": "1.0.3",
+  "root": {
+    "path": "rootfs",
+    "readonly": false
+  },
+  "hostname": "bento-test",
+
+  "process": {
+    "args": ["echo", "hello world"],
+    "cwd": "/",
+    "env": ["PATH=/usr/bin"]
+  },
+
+  "mounts": [
+    {
+      "destination": "/",
+      "type": "bind",
+      "source": "rootfs",
+      "options": ["rbind", "rw"]
+    },
+    {
+      "destination": "/proc",
+      "type": "proc",
+      "source": "proc",
+      "options": []
+    },
+    {
+      "destination": "/sys",
+      "type": "sysfs",
+      "source": "sysfs",
+      "options": ["ro"]
+    }
+  ],
+
+  "linux": {
+    "uidMappings": [
+      { "container_id": 0, "host_id": 1000, "size": 1 }
+    ],
+    "gidMappings": [
+      { "container_id": 0, "host_id": 1000, "size": 1 }
+    ],
+    "namespaces": [
+      { "type": "pid" },
+      { "type": "net" },
+      { "type": "uts" }
+    ]
+  }
+}
