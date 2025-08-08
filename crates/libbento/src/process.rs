@@ -1,5 +1,6 @@
 // crates/libbento/src/process.rs
 
+use crate::cgroups::{CgroupManager, CgroupsConfig};
 use crate::fs;
 use crate::syscalls::{
     disable_setgroups_for_child, fork_intermediate, map_user_namespace_rootless,
@@ -30,6 +31,7 @@ pub struct ContainerState {
     pub bundle_path: String,
     pub created_at: String,
     pub start_pipe_path: Option<String>, // Store for bento start to reopen
+    pub cgroup_enabled: bool,
 }
 
 impl ContainerState {
@@ -47,6 +49,7 @@ impl ContainerState {
             bundle_path,
             created_at,
             start_pipe_path: None, // Will be set when created
+            cgroup_enabled: true,
         }
     }
 }
@@ -68,7 +71,7 @@ fn save_container_state(container_id: &str, state: &ContainerState) -> Result<Pa
     Ok(state_file)
 }
 
-fn load_container_state(container_id: &str) -> Result<ContainerState> {
+pub fn load_container_state(container_id: &str) -> Result<ContainerState> {
     let state_dir = get_state_dir()?;
     let state_file = state_dir.join(format!("{container_id}.json"));
 
@@ -80,6 +83,124 @@ fn load_container_state(container_id: &str) -> Result<ContainerState> {
     let state: ContainerState =
         serde_json::from_str(&json_content).context("Failed to parse state file")?;
     Ok(state)
+}
+
+pub fn stop_container(container_id: &str) -> Result<()> {
+    println!("[Stop] Stopping container: {}", container_id);
+
+    let mut state = load_container_state(container_id)
+        .with_context(|| format!("Failed to load state for container '{}'", container_id))?;
+
+    if state.status == "stopped" {
+        return Err(anyhow!("Container '{}' is already stopped", container_id));
+    }
+
+    let container_pid = Pid::from_raw(state.pid);
+
+    match kill(container_pid, Signal::SIGTERM) {
+        Ok(_) => {
+            println!("[Stop] Sent SIGTERM to container process {}", state.pid);
+
+            std::thread::sleep(std::time::Duration::from_secs(2));
+
+            match kill(container_pid, Signal::SIGCONT) {
+                Ok(_) => {
+                    println!("[Stop] Container still running, sending SIGKILL");
+                    kill(container_pid, Signal::SIGKILL)?;
+                }
+                Err(_) => {
+                    println!("[Stop] Container stopped gracefully");
+                }
+            }
+        }
+        Err(_) => {
+            println!("[Stop] Container process {} was already dead", state.pid);
+        }
+    }
+
+    // ============================================================================
+    // Cleanup cgroups
+    // ============================================================================
+    if state.cgroup_enabled {
+        match CgroupManager::new(container_id.to_string()) {
+            Ok(manager) => {
+                if let Err(e) = manager.cleanup() {
+                    eprintln!("[Stop] Warning: Failed to cleanup cgroups: {}", e);
+                } else {
+                    println!("[Stop] Cgroups cleaned up successfully");
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "[Stop] Warning: Failed to create cgroup manager for cleanup: {}",
+                    e
+                );
+            }
+        }
+    }
+
+    cleanup_named_pipes(container_id)?;
+
+    state.status = "stopped".to_string();
+    save_container_state(container_id, &state)?;
+
+    println!("[Stop] Container '{}' stopped successfully", container_id);
+    Ok(())
+}
+
+pub fn delete_container(container_id: &str) -> Result<()> {
+    println!("[Delete] Deleting container: {}", container_id);
+
+    let state_result = load_container_state(container_id);
+    if let Ok(state) = state_result {
+        if state.status != "stopped" {
+            match stop_container(container_id) {
+                Ok(_) => println!("[Delete] Container stopped before deletion"),
+                Err(e) => {
+                    // Continue with deletion even if stop fails
+                    println!("[Delete] Warning: Failed to stop container: {}", e);
+                }
+            }
+        }
+    } else {
+        println!("[Delete] Container state not found, proceeding with cleanup");
+    }
+
+    // ============================================================================
+    // Ensure cgroups are cleaned up
+    // ============================================================================
+    if let Ok(manager) = CgroupManager::new(container_id.to_string()) {
+        let _ = manager.cleanup(); // Best effort cleanup
+        println!("[Delete] Cgroups cleanup attempted");
+    }
+
+    let home = std::env::var("HOME")?;
+    let container_dir = PathBuf::from(format!("{}/.local/share/bento/{}", home, container_id));
+    if container_dir.exists() {
+        std::fs::remove_dir_all(&container_dir).with_context(|| {
+            format!(
+                "Failed to remove container directory: {}",
+                container_dir.display()
+            )
+        })?;
+        println!(
+            "[Delete] Removed container rootfs: {}",
+            container_dir.display()
+        );
+    }
+
+    let state_dir = get_state_dir()?;
+    let state_file = state_dir.join(format!("{}.json", container_id));
+    if state_file.exists() {
+        std::fs::remove_file(&state_file)
+            .with_context(|| format!("Failed to remove state file: {}", state_file.display()))?;
+        println!("[Delete] Removed state file: {}", state_file.display());
+    }
+
+    cleanup_named_pipes(container_id)?;
+
+    println!("[Delete] Container '{}' deleted successfully", container_id);
+    Ok(())
 }
 
 // ============================================================================
@@ -121,6 +242,7 @@ pub struct Config {
     pub bundle_path: String,
     pub container_id: String,
     pub population_method: RootfsPopulationMethod, // NEW: Add this field
+    pub cgroups: CgroupsConfig,
 }
 
 impl Default for Config {
@@ -128,23 +250,24 @@ impl Default for Config {
         Self {
             root_path: "/tmp/bento-rootfs".to_string(),
 
-	    //args: vec!["/bin/sh".to_string(), "-c".to_string(), "echo '=== Bento.rs Demo: Isolation Showcase ===' && echo 'Kernel Info:' && uname -a && echo 'Hostname:' && hostname && echo 'User Info:' && whoami && id && echo 'Namespace Files:' && ls /proc/self/ns && echo 'UID Mapping:' && cat /proc/self/uid_map && echo 'Process Tree:' && ps aux && echo 'Mount Points:' && cat /proc/mounts && echo 'Environment:' && env && echo '=== End Demo: Functional Container Achieved! ==='".to_string()],
+            //args: vec!["/bin/sh".to_string(), "-c".to_string(), "echo '=== Bento.rs Demo: Isolation Showcase ===' && echo 'Kernel Info:' && uname -a && echo 'Hostname:' && hostname && echo 'User Info:' && whoami && id && echo 'Namespace Files:' && ls /proc/self/ns && echo 'UID Mapping:' && cat /proc/self/uid_map && echo 'Process Tree:' && ps aux && echo 'Mount Points:' && cat /proc/mounts && echo 'Environment:' && env && echo '=== End Demo: Functional Container Achieved! ==='".to_string()],
 
-	/*args: vec!["/bin/sh".to_string(), "-c".to_string(), 
-    "echo '=== Bento.rs Demo: Isolation Showcase ===' && \
-    echo 'Kernel Info:' && uname -a && \
-    echo 'Hostname:' && hostname && \
-    echo 'User Info:' && whoami && id && \
-    echo 'Namespace Files:' && ls /proc/self/ns && \
-    echo 'UID Mapping:' && cat /proc/self/uid_map && \
-    echo 'Process Tree:' && ps aux && \
-    echo 'Mount Points:' && cat /proc/mounts && \
-    echo 'Environment:' && env && \
-    echo '=== End Demo: Functional Container Achieved! ==='".to_string()],
-*/
-
-args: vec!["/bin/sh".to_string(), "-c".to_string(), 
-    "echo '=== Bento.rs Demo: Isolation Showcase ===' && \
+            /*args: vec!["/bin/sh".to_string(), "-c".to_string(),
+                "echo '=== Bento.rs Demo: Isolation Showcase ===' && \
+                echo 'Kernel Info:' && uname -a && \
+                echo 'Hostname:' && hostname && \
+                echo 'User Info:' && whoami && id && \
+                echo 'Namespace Files:' && ls /proc/self/ns && \
+                echo 'UID Mapping:' && cat /proc/self/uid_map && \
+                echo 'Process Tree:' && ps aux && \
+                echo 'Mount Points:' && cat /proc/mounts && \
+                echo 'Environment:' && env && \
+                echo '=== End Demo: Functional Container Achieved! ==='".to_string()],
+            */
+            args: vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "echo '=== Bento.rs Demo: Isolation Showcase ===' && \
     echo -n 'Kernel Info: ' && uname -a && \
     echo -n 'Hostname: ' && hostname && \
     echo -n 'User Info: ' && whoami && echo -n 'ID: ' && id && \
@@ -152,8 +275,9 @@ args: vec!["/bin/sh".to_string(), "-c".to_string(),
     echo -n 'UID Mapping: ' && cat /proc/self/uid_map && \
     echo -n 'Process Tree: ' && ps aux && \
     echo -n 'Mount Points: ' && cat /proc/mounts && \
-    echo '=== End Demo: Functional Container Achieved! ==='".to_string()],
-
+    echo '=== End Demo: Functional Container Achieved! ==='"
+                    .to_string(),
+            ],
 
             //args: vec!["/bin/sh".to_string(), "-c".to_string(), "cat /proc/meminfo | head -5 && echo 'System info accessible'".to_string()],
             //args: vec!["/bin/sh".to_string(), "-c".to_string(), "env | sort && echo 'PATH:' $PATH".to_string()],
@@ -185,6 +309,7 @@ args: vec!["/bin/sh".to_string(), "-c".to_string(),
             bundle_path: ".".to_string(),
             container_id: "default".to_string(),
             population_method: RootfsPopulationMethod::BusyBox, // NEW: Default to reliable method
+            cgroups: CgroupsConfig::new(),
         }
     }
 }
@@ -305,6 +430,14 @@ fn orchestrator_handler(bridge_pid: Pid, pipes: OrchestratorPipes, config: &Conf
     let final_container_pid = i32::from_le_bytes(pid_buf);
     println!("[Orchestrator] Final container PID: {final_container_pid}");
 
+    let cgroup_manager = CgroupManager::new(config.container_id.clone())?;
+    if let Err(e) = cgroup_manager.setup(&config.cgroups, Pid::from_raw(final_container_pid)) {
+        eprintln!("[Orchestrator] Warning: Cgroups setup failed: {}", e);
+        eprintln!("[Orchestrator] Container will continue without resource limits");
+    } else {
+        println!("[Orchestrator] Cgroups configured successfully");
+    }
+
     cleanup_named_pipes(&config.container_id).context("Failed to cleanup pipes before creation")?;
 
     // State management
@@ -396,25 +529,34 @@ fn orchestrator_handler(bridge_pid: Pid, pipes: OrchestratorPipes, config: &Conf
         }
     }*/
 
-match waitpid(bridge_pid, None) {
-    Ok(WaitStatus::Exited(pid, status)) => {
-        println!("[Orchestrator] Bridge {} exited with status {}", pid, status);
-        if status != 0 {
-            return Err(anyhow!("[Orchestrator] Bridge exited with non-zero status {}", status));
+    match waitpid(bridge_pid, None) {
+        Ok(WaitStatus::Exited(pid, status)) => {
+            println!(
+                "[Orchestrator] Bridge {} exited with status {}",
+                pid, status
+            );
+            if status != 0 {
+                return Err(anyhow!(
+                    "[Orchestrator] Bridge exited with non-zero status {}",
+                    status
+                ));
+            }
+        }
+        Err(nix::errno::Errno::ECHILD) => {
+            //  Treat as success: child already reaped
+            println!(
+                "[Orchestrator] Bridge already exited and reaped (ECHILD) - normal for fast exits"
+            );
+        }
+        Err(e) => {
+            return Err(anyhow!("[Orchestrator] Bridge wait failed: {}", e));
+        }
+        _ => {
+            println!("[Orchestrator] Unexpected bridge status");
         }
     }
-    Err(nix::errno::Errno::ECHILD) => {  //  Treat as success: child already reaped
-        println!("[Orchestrator] Bridge already exited and reaped (ECHILD) - normal for fast exits");
-    }
-    Err(e) => {
-        return Err(anyhow!("[Orchestrator] Bridge wait failed: {}", e));
-    }
-    _ => {
-        println!("[Orchestrator] Unexpected bridge status");
-    }
-}
 
-// Ensure the rest of the function proceeds only if no errors occurred earlier
+    // Ensure the rest of the function proceeds only if no errors occurred earlier
     println!(
         "[Orchestrator] Container '{}' created successfully (status: created)",
         config.container_id
@@ -515,7 +657,7 @@ fn create_init_with_start_pipe(config: &Config, pipes: &BridgePipes) -> isize {
 // INIT PROCESS LOGIC (Container Init - PID 1)
 // ============================================================================
 
-fn init_handler_with_pause(config: &Config, _start_pipe_fd: i32) -> isize {
+fn init_handler_with_pause(config: &Config, start_pipe_fd: i32) -> isize {
     println!("[Init] I am PID 1 in container: {}", getpid());
     println!("[Init] Container ID: {}", config.container_id);
     //println!("[Init] Command to execute: {:?}", config.args);
@@ -560,13 +702,7 @@ fn init_handler_with_pause(config: &Config, _start_pipe_fd: i32) -> isize {
         return 1;
     }
 
-    // Phase 3: Environment setup
-    if let Err(e) = setup_container_environment() {
-        eprintln!("[Init] Failed to setup environment: {}", e);
-        return 1;
-    }
-
-    // Phase 4: Enter PAUSE state
+    // Phase 3: Enter PAUSE state (set environment AFTER we receive start)
     let start_pipe_path = format!("/tmp/bento-start-{}", config.container_id);
     println!("[Init] Container setup complete - entering PAUSE state");
     println!("[Init] Waiting for signal at: {}", start_pipe_path);
@@ -576,8 +712,9 @@ fn init_handler_with_pause(config: &Config, _start_pipe_fd: i32) -> isize {
     );
     println!("[Init] Current PATH: {:?}", std::env::var("PATH"));
 
-    // Read start signal with proper error handling
-    match read_start_signal(&start_pipe_path) {
+    // Read start signal with proper error handling (prefer FD path first)
+    match read_start_signal_from_fd(start_pipe_fd).or_else(|_| read_start_signal(&start_pipe_path))
+    {
         Ok(_) => {
             println!("[Init] Start signal received successfully");
         }
@@ -585,6 +722,12 @@ fn init_handler_with_pause(config: &Config, _start_pipe_fd: i32) -> isize {
             eprintln!("[Init] Failed to read start signal: {}", e);
             return 1;
         }
+    }
+
+    // Phase 4: Environment setup (now that we've consumed the start signal)
+    if let Err(e) = setup_container_environment() {
+        eprintln!("[Init] Failed to setup environment: {}", e);
+        return 1;
     }
 
     // Phase 5: Execute user command with extensive debugging
@@ -615,24 +758,89 @@ fn read_start_signal(pipe_path: &str) -> Result<()> {
 
     println!("[Init] Opening start pipe: {}", pipe_path);
 
-    let mut pipe = std::fs::OpenOptions::new()
-        .read(true)
-        .open(pipe_path)
-        .with_context(|| format!("Failed to open start pipe: {}", pipe_path))?;
+    // Attempt container-relative path first (works after pivot_root)
+    let mut try_paths: Vec<String> = vec![pipe_path.to_string()];
 
-    let mut buffer = [0u8; 5]; // Expect exactly "start" (5 bytes)
+    // Fallback: if pivot_root was skipped, the FIFO lives under the host rootfs path
+    if let Some(name) = std::path::Path::new(pipe_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+    {
+        if let Some(id) = name.strip_prefix("bento-start-") {
+            // Derive a plausible HOME directory even if HOME is not set yet
+            let home = std::env::var("HOME")
+                .ok()
+                .filter(|h| !h.is_empty())
+                .or_else(|| {
+                    // Try USER -> /home/USER fallback
+                    std::env::var("USER").ok().map(|u| format!("/home/{}", u))
+                })
+                .unwrap_or_else(|| "/home/unknown".to_string());
 
-    // Use read_exact for atomic, complete reads
+            let host_path = format!("{}/.local/share/bento/{}/rootfs{}", home, id, pipe_path);
+            try_paths.push(host_path);
+        }
+    }
+
+    let mut last_err: Option<anyhow::Error> = None;
+    let mut pipe_opt: Option<std::fs::File> = None;
+    for p in &try_paths {
+        match std::fs::OpenOptions::new().read(true).open(p) {
+            Ok(f) => {
+                println!("[Init] Opened start pipe at: {}", p);
+                pipe_opt = Some(f);
+                break;
+            }
+            Err(e) => {
+                last_err = Some(anyhow::anyhow!("Failed to open {}: {}", p, e));
+            }
+        }
+    }
+
+    let mut pipe = if let Some(f) = pipe_opt {
+        f
+    } else {
+        return Err(
+            last_err.unwrap_or_else(|| anyhow::anyhow!("No start pipe path could be opened"))
+        );
+    };
+
+    let mut buffer = [0u8; 5]; // Expect exactly "start"
     pipe.read_exact(&mut buffer)
         .context("Failed to read complete start signal from pipe")?;
 
-    // Verify signal content
     if &buffer == b"start" {
         println!("[Init] Received valid start signal");
         Ok(())
     } else {
-        Err(anyhow!(
+        Err(anyhow::anyhow!(
             "Invalid start signal received: {:?}",
+            String::from_utf8_lossy(&buffer)
+        ))
+    }
+}
+
+fn read_start_signal_from_fd(fd: i32) -> Result<()> {
+    use std::io::Read;
+    use std::os::unix::io::FromRawFd;
+
+    println!("[Init] Waiting for start signal on FD {}", fd);
+
+    // SAFETY: We are in the forked child; this FD was created by parent and
+    // duplicated into us via fork. Wrapping it in File transfers ownership to this
+    // handle in the child, which is fine.
+    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+
+    let mut buffer = [0u8; 5];
+    file.read_exact(&mut buffer)
+        .context("Failed to read complete start signal from FD")?;
+
+    if &buffer == b"start" {
+        println!("[Init] Received valid start signal via FD");
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(
+            "Invalid start signal received via FD: {:?}",
             String::from_utf8_lossy(&buffer)
         ))
     }
@@ -977,6 +1185,7 @@ pub struct ContainerInfo {
     pub bundle_path: String,
     pub created_at: String,
     pub runtime_status: RuntimeStatus,
+    pub cgroup_stats: Option<crate::cgroups::CgroupStats>,
 }
 
 /// Container status enumeration
@@ -1013,6 +1222,15 @@ impl ContainerInfo {
             _ => ContainerStatus::Created, // Default fallback
         };
 
+        let cgroup_stats = if state.cgroup_enabled {
+            match CgroupManager::new(state.id.clone()) {
+                Ok(manager) => manager.get_stats().ok(),
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
+
         Ok(Self {
             id: state.id,
             pid: state.pid,
@@ -1020,6 +1238,7 @@ impl ContainerInfo {
             bundle_path: state.bundle_path,
             created_at: state.created_at,
             runtime_status,
+            cgroup_stats,
         })
     }
 
@@ -1031,6 +1250,30 @@ impl ContainerInfo {
             (_, RuntimeStatus::Dead) => "stopped".to_string(),
             (ContainerStatus::Paused, RuntimeStatus::Alive) => "paused".to_string(),
             _ => "unknown".to_string(),
+        }
+    }
+
+    pub fn memory_usage_display(&self) -> String {
+        if let Some(stats) = &self.cgroup_stats {
+            let usage_mb = stats.memory_usage / 1024 / 1024;
+            match stats.memory_limit {
+                Some(limit) => {
+                    let limit_mb = limit / 1024 / 1024;
+                    format!("{}MB / {}MB", usage_mb, limit_mb)
+                }
+                None => format!("{}MB / unlimited", usage_mb),
+            }
+        } else {
+            "N/A".to_string()
+        }
+    }
+
+    pub fn cpu_usage_display(&self) -> String {
+        if let Some(stats) = &self.cgroup_stats {
+            let cpu_seconds = stats.cpu_usage_usec / 1_000_000;
+            format!("{}s", cpu_seconds)
+        } else {
+            "N/A".to_string()
         }
     }
 }

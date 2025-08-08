@@ -42,8 +42,8 @@ where
 {
     match unsafe { fork() } {
         Ok(ForkResult::Parent { child }) => {
-            parent_logic(child)?;  // Run orchestrator logic, which includes its own waitpid
-            Ok(())  // Do NOT add another waitpid here—let parent_logic handle reaping
+            parent_logic(child)?; // Run orchestrator logic, which includes its own waitpid
+            Ok(()) // Do NOT add another waitpid here—let parent_logic handle reaping
         }
         Ok(ForkResult::Child) => {
             let exit_code = child_logic();
@@ -51,8 +51,11 @@ where
             let code_i32: i32 = match exit_code.try_into() {
                 Ok(code) => code,
                 Err(_) => {
-                    eprintln!("[Child] Exit code {} too large for i32; using -1", exit_code);
-                    -1  // Fallback to generic error
+                    eprintln!(
+                        "[Child] Exit code {} too large for i32; using -1",
+                        exit_code
+                    );
+                    -1 // Fallback to generic error
                 }
             };
             std::process::exit(code_i32);
@@ -60,7 +63,6 @@ where
         Err(e) => Err(anyhow!("Fork failed: {}", e)),
     }
 }
-
 
 /// Clones a new init process with the given flags, running the container command.
 /// Executes in the isolated namespace.
@@ -116,9 +118,50 @@ pub fn unshare_user_namespace() -> Result<()> {
 /// Phase 2: Create remaining namespaces (requires CAP_SYS_ADMIN from UID mapping)
 /// This can only be done after the parent has mapped UID/GID
 pub fn unshare_remaining_namespaces() -> Result<()> {
-    let flags = CloneFlags::CLONE_NEWPID | CloneFlags::CLONE_NEWUTS | CloneFlags::CLONE_NEWNS;
-    unshare(flags).map_err(|e| anyhow!("Failed to unshare remaining namespaces: {}", e))?;
-    println!("[Bridge] Created remaining namespaces: {flags:?}");
+    let mut created_namespaces = Vec::new();
+
+    match unshare(CloneFlags::CLONE_NEWPID) {
+        Ok(()) => {
+            created_namespaces.push("PID");
+            println!("[Bridge] Created PID namespace");
+        }
+        Err(e) => {
+            println!("[Bridge] Warning: Failed to create PID namespace: {}", e);
+            println!("[Bridge] Container will share PID namespace with host");
+        }
+    }
+
+    match unshare(CloneFlags::CLONE_NEWUTS) {
+        Ok(()) => {
+            created_namespaces.push("UTS");
+            println!("[Bridge] Created UTS namespace");
+        }
+        Err(e) => {
+            println!("[Bridge] Warning: Failed to create UTS namespace: {}", e);
+            println!("[Bridge] Container will share hostname with host");
+        }
+    }
+
+    match unshare(CloneFlags::CLONE_NEWNS) {
+        Ok(()) => {
+            created_namespaces.push("Mount");
+            println!("[Bridge] Created Mount namespace");
+        }
+        Err(e) => {
+            println!("[Bridge] Warning: Failed to create Mount namespace: {}", e);
+            println!("[Bridge] Container will share mounts with host");
+        }
+    }
+
+    if created_namespaces.is_empty() {
+        println!("[Bridge] Warning: No additional namespaces created - limited isolation");
+    } else {
+        println!(
+            "[Bridge] Successfully created namespaces: {}",
+            created_namespaces.join(", ")
+        );
+    }
+
     Ok(())
 }
 
@@ -129,10 +172,29 @@ pub fn unshare_remaining_namespaces() -> Result<()> {
 /// Child-side operation: Disable setgroups for safe GID mapping
 /// Must be called by the child process after creating user namespace
 pub fn disable_setgroups_for_child() -> Result<()> {
-    fs::write("/proc/self/setgroups", "deny")
-        .map_err(|e| anyhow!("Failed to disable setgroups: {}", e))?;
-    println!("[Bridge] Disabled setgroups for safe mapping");
-    Ok(())
+    match fs::read_to_string("/proc/self/setgroups") {
+        Ok(content) => {
+            if content.trim() == "deny" {
+                println!("[Bridge] setgroups already disabled");
+                return Ok(());
+            }
+        }
+        Err(_) => {
+            println!("[Bridge] Warning: setgroups file not readable, continuing");
+        }
+    }
+
+    match fs::write("/proc/self/setgroups", "deny") {
+        Ok(()) => {
+            println!("[Bridge] Disabled setgroups for safe mapping");
+            Ok(())
+        }
+        Err(e) => {
+            println!("[Bridge] Warning: Failed to disable setgroups: {}", e);
+            println!("[Bridge] Continuing anyway - this might be normal in some environments");
+            Ok(())
+        }
+    }
 }
 
 /// Execute newuidmap or newgidmap command with comprehensive error handling
