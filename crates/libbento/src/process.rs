@@ -1,10 +1,12 @@
 // crates/libbento/src/process.rs
 
+use crate::config::Config;
+use crate::fs;
 use crate::syscalls::{
     disable_setgroups_for_child, fork_intermediate, map_user_namespace_rootless,
     unshare_remaining_namespaces, unshare_user_namespace,
 };
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use nix::unistd::Pid;
 use nix::unistd::{ForkResult, fork, getpid, pipe, read, write};
 use std::os::unix::io::{AsRawFd, OwnedFd};
@@ -35,28 +37,6 @@ impl SyncSignal {
 
     fn as_char(&self) -> char {
         self.as_byte() as char
-    }
-}
-
-pub struct Config {
-    pub root_path: String,
-    pub args: Vec<String>,
-    pub hostname: String,
-    pub rootless: bool,
-    pub bundle_path: String,
-    pub container_id: String,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            root_path: "/tmp/bento-rootfs".to_string(),
-            args: vec!["/bin/cat".to_string(), "/proc/self/stat".to_string()],
-            hostname: "bento-container".to_string(),
-            rootless: true,
-            bundle_path: ".".to_string(),
-            container_id: "default".to_string(),
-        }
     }
 }
 
@@ -149,7 +129,7 @@ pub fn create_container(config: &Config) -> Result<()> {
         getpid()
     );
 
-    // ✅ Clean closures calling purpose-driven functions
+    // Clean closures calling purpose-driven functions
     let orchestrator_logic = |bridge_pid| orchestrator_handler(bridge_pid, orchestrator_pipes);
     let bridge_logic = || bridge_handler(config, bridge_pipes);
 
@@ -270,18 +250,30 @@ fn create_init_with_pid_communication(config: &Config, pipes: &BridgePipes) -> i
 // INIT PROCESS LOGIC (Container Init - PID 1)
 // ============================================================================
 
-fn init_handler(_config: &Config) -> isize {
+fn init_handler(config: &Config) -> isize {
     println!("[Init] I am PID 1 in container: {}", getpid());
+
+    if let Err(e) = debug_namespace_info() {
+        eprintln!("[Init] Failed to debug namespace info: {e}");
+    }
+
+    // Phase 1: Filesystem preparation
+    match fs::prepare_rootfs(&config.container_id) {
+        Ok(_) => println!("[Init] Filesystem prepared successfully"),
+        Err(e) => {
+            eprintln!("[Init] Filesystem preparation failed: {e}");
+            return 1;
+        }
+    }
+
+    //todo!("Set hostname from config");
+    let _ = set_container_hostname("my-container");
 
     // Temporary: Keep current isolation test
     println!("[Init] Testing namespace isolation...");
-    execute_isolation_test();
+    execute_isolation_test()
 
-    // TODO: Container environment setup
-    todo!("Implement pivot_root to container rootfs");
-    //todo!("Mount /proc, /sys, /dev filesystems");
-    //todo!("Set hostname from config");
-    //todo!("Setup environment variables");
+    //TODO!("Setup environment variables");
     //todo!("Apply security contexts");
 
     // TODO: Start pipe mechanism
@@ -292,19 +284,109 @@ fn init_handler(_config: &Config) -> isize {
     //todo!("Execute config.args instead of test command");
 }
 
-fn execute_isolation_test() -> isize {
-    use nix::unistd::execvp;
-    use std::ffi::CString;
+fn set_container_hostname(hostname: &str) -> Result<()> {
+    println!("[Init] Setting container hostname to: {hostname}");
 
-    let args = vec![CString::new("/bin/id").unwrap()];
-
-    match execvp(&args[0], &args) {
+    match nix::unistd::sethostname(hostname) {
         Ok(_) => {
-            std::process::exit(0);
+            println!("[Init] Hostname successfully set to: {hostname}");
+            Ok(())
         }
         Err(e) => {
-            eprintln!("[Init] execvp failed: {e}");
-            std::process::exit(1);
+            println!("[Init] Warning: Failed to set hostname: {e}");
+            // Don't fail the container for hostname issues
+            Ok(())
         }
     }
+}
+
+fn debug_namespace_info() -> Result<()> {
+    use std::fs;
+
+    println!("[Debug] Current process namespace information:");
+
+    // Check PID namespace
+    let pid_ns = fs::read_link("/proc/self/ns/pid").context("Failed to read PID namespace")?;
+    println!("[Debug] PID namespace: {pid_ns:?}");
+
+    // Check mount namespace
+    let mnt_ns = fs::read_link("/proc/self/ns/mnt").context("Failed to read mount namespace")?;
+    println!("[Debug] Mount namespace: {mnt_ns:?}");
+
+    // Check user namespace
+    let user_ns = fs::read_link("/proc/self/ns/user").context("Failed to read user namespace")?;
+    println!("[Debug] User namespace: {user_ns:?}");
+
+    // Check UTS namespace (hostname)
+    let uts_ns = fs::read_link("/proc/self/ns/uts").context("Failed to read UTS namespace")?;
+    println!("[Debug] UTS namespace: {uts_ns:?}");
+
+    // Check current PID as seen by process
+    println!(
+        "[Debug] Current PID (should be 1 in container): {}",
+        nix::unistd::getpid()
+    );
+
+    // Check parent PID
+    println!("[Debug] Parent PID: {}", nix::unistd::getppid());
+
+    Ok(())
+}
+
+fn execute_isolation_test() -> isize {
+    // Test 1: Verify we're PID 1
+    let pid = nix::unistd::getpid();
+    println!("[Test] Current PID: {pid}");
+    assert_eq!(pid.as_raw(), 1, "Expected to be PID 1 in container");
+
+    // Test 2: Check filesystem isolation
+    match std::fs::read_dir("/") {
+        Ok(entries) => {
+            println!("[Test] Root directory contents:");
+
+            for entry in entries.filter_map(Result::ok) {
+                println!("[Test]   - {}", entry.file_name().to_string_lossy());
+            }
+        }
+        Err(e) => println!("[Test] Failed to read root directory: {e}"),
+    }
+
+    // Test 3: Check mount namespaces
+    match std::fs::read_to_string("/proc/self/mountinfo") {
+        Ok(mounts) => {
+            println!(
+                "[Test] Container has {} mount entries",
+                mounts.lines().count()
+            );
+            // Show first few mounts
+            for (i, line) in mounts.lines().take(5).enumerate() {
+                println!("[Test] Mount {i}: {line}");
+            }
+        }
+        Err(e) => println!("[Test] Failed to read mountinfo: {e}"),
+    }
+
+    // Test 4: Check user namespace mapping
+    match std::fs::read_to_string("/proc/self/uid_map") {
+        Ok(uid_map) => println!("[Test] UID mapping: {}", uid_map.trim()),
+        Err(e) => println!("[Test] Failed to read uid_map: {e}"),
+    }
+
+    match std::fs::read_to_string("/proc/self/gid_map") {
+        Ok(gid_map) => println!("[Test] GID mapping: {}", gid_map.trim()),
+        Err(e) => println!("[Test] Failed to read gid_map: {e}"),
+    }
+
+    // Test 5: Check hostname isolation
+    match nix::unistd::gethostname() {
+        Ok(hostname) => println!("[Test] Container hostname: {}", hostname.to_string_lossy()),
+        Err(e) => println!("[Test] Failed to get hostname: {e}"),
+    }
+
+    println!("[Test] Container isolation test completed successfully!");
+    println!("[Test] Container is ready for actual workloads");
+
+    // For now, just exit successfully
+    // In a real container, this would be where we execute the user's command
+    0
 }

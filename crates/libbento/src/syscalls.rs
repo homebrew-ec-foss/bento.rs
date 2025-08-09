@@ -9,8 +9,7 @@ use std::ffi::CString;
 use std::fs;
 use std::process::Command;
 
-use crate::process::Config;
-
+use crate::config::Config;
 // ============================================================================
 // FORK AND PROCESS CREATION
 // ============================================================================
