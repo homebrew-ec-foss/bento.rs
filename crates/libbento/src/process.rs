@@ -264,7 +264,7 @@ impl Default for Config {
                 echo 'Environment:' && env && \
                 echo '=== End Demo: Functional Container Achieved! ==='".to_string()],
             */
-            args: vec![
+            /*args: vec![
                 "/bin/sh".to_string(),
                 "-c".to_string(),
                 "echo '=== Bento.rs Demo: Isolation Showcase ===' && \
@@ -277,7 +277,8 @@ impl Default for Config {
     echo -n 'Mount Points: ' && cat /proc/mounts && \
     echo '=== End Demo: Functional Container Achieved! ==='"
                     .to_string(),
-            ],
+            ],*/
+            args: vec!["/bin/sh".to_string(), "-c".to_string(), "echo hello".to_string(),],
 
             //args: vec!["/bin/sh".to_string(), "-c".to_string(), "cat /proc/meminfo | head -5 && echo 'System info accessible'".to_string()],
             //args: vec!["/bin/sh".to_string(), "-c".to_string(), "env | sort && echo 'PATH:' $PATH".to_string()],
