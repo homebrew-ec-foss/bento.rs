@@ -599,9 +599,9 @@ fn init_handler_with_pause(config: &Config, _start_pipe_fd: i32) -> isize {
     if !config.args.is_empty() {
         let cmd = &config.args[0];
         if Path::new(cmd).exists() {
-            println!("[Init] ✓ Final validation: Command {} exists", cmd);
+            println!("[Init] Final validation: Command {} exists", cmd);
         } else {
-            eprintln!("[Init] ✗ CRITICAL: Command {} missing at exec time!", cmd);
+            eprintln!("[Init] CRITICAL: Command {} missing at exec time!", cmd);
             return 1;
         }
     }

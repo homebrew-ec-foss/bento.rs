@@ -10,3 +10,4 @@ busybox-static
 container-commands-test.tx
 demo-bundle/
 demo-commands.tx
+crates/libbento/src/pty_spawn.rs
