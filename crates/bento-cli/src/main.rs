@@ -51,37 +51,48 @@ fn main() {
             todo!("Generate OCI spec template");
         }
         Commands::Create {
-            container_id,
-            bundle,
-        } => {
-            let cfg_path = bundle.join("config.json");
-            match OciConfig::load(&cfg_path) {
-                Ok(cfg) => {
-                    println!(
-                        "Container '{}' validated. rootfs = {}",
-                        container_id,
-                        cfg.root.path.display()
-                    );
-                    println!(
-                        "Creating container '{}' with bundle '{}'",
-                        container_id,
-                        bundle.display()
-                    );
+	    container_id,
+	    bundle,
+	} => {
+	    let cfg_path = bundle.join("config.json");
+	    match OciConfig::load(&cfg_path) {
+		Ok(cfg) => {
+		    println!(
+		        "Container '{}' validated. rootfs = {}",
+		        container_id,
+		        cfg.root.path.display()
+		    );
+		    println!(
+		        "Creating container '{}' with bundle '{}'",
+		        container_id,
+		        bundle.display()
+		    );
 
-                    // Here we make a ProcessConfig from the OCI config
-                    let process_config = ProcessConfig::default(); 
-                    // TODO: convert `cfg` to `process_config` if needed
+		    // Build ProcessConfig from OciConfig
+		    let process_config = ProcessConfig {
+		        root_path: bundle.join(&cfg.root.path).to_string_lossy().into_owned(),
+		        args: cfg
+		            .process
+		            .as_ref()
+		            .map(|p| p.args.clone())
+		            .unwrap_or_default(),
+		        hostname: cfg.hostname.clone().unwrap_or_else(|| "bento-container".to_string()),
+		        rootless: false, // or detect from `cfg.linux` if needed
+		        bundle_path: bundle.to_string_lossy().into_owned(),
+		        container_id: container_id.clone(),
+		    };
 
-                    if let Err(e) = create_container(&process_config) {
-                        eprintln!("Container creation failed: {e}");
-                    }
-                }
-                Err(e) => {
-                    error!("Invalid bundle: {}", e);
-                    std::process::exit(1);
-                }
-            }
-        }
+		    if let Err(e) = create_container(&process_config) {
+		        eprintln!("Container creation failed: {e}");
+		    }
+		}
+		Err(e) => {
+		    error!("Invalid bundle: {}", e);
+		    std::process::exit(1);
+		}
+	    }
+	}
+
         Commands::Start { container_id } => {
             println!("Starting container '{container_id}'");
             todo!("Generate OCI spec template");
