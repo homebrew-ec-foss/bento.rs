@@ -25,7 +25,7 @@ pub enum Commands {
         /// Rootfs population method: 'busybox' for static binary or 'manual' for host binary copying
         #[arg(
             long,
-            default_value = "busybox",
+            default_value = "manual",
             help = "Method to populate container rootfs: 'busybox' or 'manual'"
         )]
         population_method: String,
