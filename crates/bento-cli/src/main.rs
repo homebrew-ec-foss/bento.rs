@@ -1,7 +1,7 @@
 // crates/bento-cli/src/main.rs
 
 use clap::{Parser, Subcommand, ValueHint};
-use libbento::process::{RootfsPopulationMethod, create_container, start_container, Config as ProcessConfig};
+use libbento::process::{create_container, start_container, Config as ProcessConfig};
 use libbento::config::{Config as OciConfig};
 use log::info;
 use std::path::PathBuf;
@@ -74,10 +74,6 @@ fn main() {
                     rootless: false, // adjust as needed
                     bundle_path: bundle.to_string_lossy().into_owned(),
                     container_id: container_id.clone(),
-                    population_method: match population_method.as_str() {
-                        "manual" => RootfsPopulationMethod::Manual,
-                        _ => RootfsPopulationMethod::BusyBox,
-                    },
                     ..Default::default()
                 };
 
