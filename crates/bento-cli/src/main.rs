@@ -1,7 +1,7 @@
 // crates/bento-cli/src/main.rs
 
 use clap::{Parser, Subcommand, ValueHint};
-use libbento::process::{create_container, start_container, Config as ProcessConfig};
+use libbento::process::{create_container, RootfsPopulationMethod, start_container, Config as ProcessConfig};
 use libbento::config::{Config as OciConfig};
 use log::info;
 use std::path::PathBuf;
