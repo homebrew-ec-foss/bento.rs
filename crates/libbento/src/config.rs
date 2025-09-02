@@ -1,6 +1,7 @@
-use serde::Serialize;
+use nix::unistd::Uid;
 use serde::Deserialize;
-use serde_with::{serde_as, DisplayFromStr};
+use serde::Serialize;
+use serde_with::{DisplayFromStr, serde_as};
 use std::{
     collections::HashMap,
     fs::File,
@@ -8,7 +9,6 @@ use std::{
     path::{Path, PathBuf},
 };
 use thiserror::Error;
-use nix::unistd::Uid;
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -35,38 +35,38 @@ pub enum NamespaceType {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RawConfig {
-   pub oci_version : String,
-   pub root : Root,
+    pub oci_version: String,
+    pub root: Root,
 
-   #[serde(default)]
-   pub process: Option<Process>,
+    #[serde(default)]
+    pub process: Option<Process>,
 
-   #[serde(default)]
-   pub mounts: Vec<Mount>,
+    #[serde(default)]
+    pub mounts: Vec<Mount>,
 
-   #[serde(default)]
-   pub hostname: Option<String>,
+    #[serde(default)]
+    pub hostname: Option<String>,
 
-   #[serde(default)]
-   pub linux: Option<Linux>,
+    #[serde(default)]
+    pub linux: Option<Linux>,
 
-   #[serde(flatten)]
-   pub extra: HashMap<String, serde_json::Value>, // This is helpful when unknown fields are received, without this runtime throws errors.
+    #[serde(flatten)]
+    pub extra: HashMap<String, serde_json::Value>, // This is helpful when unknown fields are received, without this runtime throws errors.
 }
 
 #[derive(Debug)]
 pub struct Config {
-   pub oci_version : OciVersion,
-   pub root : Root,
-   pub process : Option<Process>,
-   pub  mounts : Vec<Mount>,
-   pub hostname : Option<String>,
-   pub linux : Linux, // it was Option<Linux>
-   pub extra : HashMap<String, serde_json::Value>,
+    pub oci_version: OciVersion,
+    pub root: Root,
+    pub process: Option<Process>,
+    pub mounts: Vec<Mount>,
+    pub hostname: Option<String>,
+    pub linux: Linux, // it was Option<Linux>
+    pub extra: HashMap<String, serde_json::Value>,
 }
 
 #[derive(Debug)]
-pub struct OciVersion(#[allow(dead_code)]String);
+pub struct OciVersion(#[allow(dead_code)] String);
 // without adding this dead_code, just a warning for not using OciVersion.
 
 #[serde_as]
@@ -163,12 +163,14 @@ impl<'de> Deserialize<'de> for Config {
 
         // 2. Rootless validation
         if Uid::effective().is_root() {
-            return Err(serde::de::Error::custom("Runtime with only Rootless container."));
+            return Err(serde::de::Error::custom(
+                "Runtime with only Rootless container.",
+            ));
         }
 
-        let linux = raw.linux.ok_or_else(|| 
-            serde::de::Error::custom("linux section required for rootless")
-        )?;
+        let linux = raw
+            .linux
+            .ok_or_else(|| serde::de::Error::custom("linux section required for rootless"))?;
 
         // Validating root mappings
         if !linux.uid_mappings.iter().any(|m| m.container_id == 0) {
@@ -181,30 +183,33 @@ impl<'de> Deserialize<'de> for Config {
         Ok(Config {
             oci_version: OciVersion(raw.oci_version),
             linux,
-            root : raw.root,
-            process : raw.process,
-            mounts : raw.mounts,
-            hostname : raw.hostname,
-            extra: raw.extra
+            root: raw.root,
+            process: raw.process,
+            mounts: raw.mounts,
+            hostname: raw.hostname,
+            extra: raw.extra,
         })
     }
 }
 
 impl Config {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
-         let file = File::open(&path)?;
-         let reader = BufReader::new(file);
-         let mut cfg: Self = serde_json::from_reader(reader)?;
-         cfg.resolve_root_rel_to_bundle(&path)?;
-         Ok(cfg)
+        let file = File::open(&path)?;
+        let reader = BufReader::new(file);
+        let mut cfg: Self = serde_json::from_reader(reader)?;
+        cfg.resolve_root_rel_to_bundle(&path)?;
+        Ok(cfg)
     }
 
     fn resolve_root_rel_to_bundle<P: AsRef<Path>>(
         &mut self,
         config_path: P,
     ) -> Result<(), ConfigError> {
-        if self.root.path.is_absolute() { return Ok(()) }
-        let abs = config_path.as_ref()
+        if self.root.path.is_absolute() {
+            return Ok(());
+        }
+        let abs = config_path
+            .as_ref()
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .join(&self.root.path);

@@ -13,9 +13,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
-fn get_rootfs(container_id: &str, config : &Config) -> Result<(PathBuf, PathBuf)> {
+fn get_rootfs(container_id: &str, config: &Config) -> Result<(PathBuf, PathBuf)> {
     let home = std::env::var("HOME")?;
-    let rootfs = PathBuf::from(format!("{home}/{:?}/{container_id}/rootfs", &config.root_path));
+    let rootfs = PathBuf::from(format!(
+        "{home}/{:?}/{container_id}/rootfs",
+        &config.root_path
+    ));
 
     fs::create_dir_all(&rootfs).context("Failed to create the rootfs directory.")?;
 
@@ -25,7 +28,7 @@ fn get_rootfs(container_id: &str, config : &Config) -> Result<(PathBuf, PathBuf)
     Ok((rootfs, old_root))
 }
 
-pub fn prepare_rootfs(container_id: &str, config : &Config) -> Result<PathBuf> {
+pub fn prepare_rootfs(container_id: &str, config: &Config) -> Result<PathBuf> {
     println!("[Init] Starting rootless-aware rootfs preparation for: {container_id}");
 
     // Phase 1: Reset mount propagation to prevent host contamination
@@ -42,7 +45,7 @@ pub fn prepare_rootfs(container_id: &str, config : &Config) -> Result<PathBuf> {
         return Err(anyhow::anyhow!("Invalid container_id: {container_id}"));
     }
 
-    let (rootfs, old_root) = get_rootfs(container_id, &config)?;
+    let (rootfs, old_root) = get_rootfs(container_id, config)?;
     println!("[Init] Rootfs: {rootfs:?}, Old root: {old_root:?}");
 
     // Phase 2: Bind mount rootfs to itself (required for pivot_root)

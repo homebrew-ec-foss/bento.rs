@@ -118,8 +118,10 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             root_path: "/tmp/bento-rootfs".to_string(),
-            args: vec!["/bin/sh".to_string(), "-c".to_string(), 
-                       "echo '=== Bento.rs Demo: Isolation Showcase ===' && \
+            args: vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "echo '=== Bento.rs Demo: Isolation Showcase ===' && \
                         echo -n 'Kernel Info: ' && uname -a && \
                         echo -n 'Hostname: ' && hostname && \
                         echo -n 'User Info: ' && whoami && echo -n 'ID: ' && id && \
@@ -127,7 +129,9 @@ impl Default for Config {
                         echo -n 'UID Mapping: ' && cat /proc/self/uid_map && \
                         echo -n 'Process Tree: ' && ps aux && \
                         echo -n 'Mount Points: ' && cat /proc/mounts && \
-                        echo '=== End Demo: Functional Container Achieved! ==='".to_string()],
+                        echo '=== End Demo: Functional Container Achieved! ==='"
+                    .to_string(),
+            ],
 
             hostname: "bento-container".to_string(),
             rootless: true,
@@ -296,26 +300,34 @@ fn orchestrator_handler(bridge_pid: Pid, pipes: OrchestratorPipes, config: &Conf
     // NEW: Wait for bridge to exit (proper daemonless cleanup)
     println!("[Orchestrator] Waiting for bridge process to exit...");
 
-
     match waitpid(bridge_pid, None) {
         Ok(WaitStatus::Exited(pid, status)) => {
-        println!("[Orchestrator] Bridge {} exited with status {}", pid, status);
-        if status != 0 {
-            return Err(anyhow!("[Orchestrator] Bridge exited with non-zero status {}", status));
+            println!(
+                "[Orchestrator] Bridge {} exited with status {}",
+                pid, status
+            );
+            if status != 0 {
+                return Err(anyhow!(
+                    "[Orchestrator] Bridge exited with non-zero status {}",
+                    status
+                ));
+            }
+        }
+        Err(nix::errno::Errno::ECHILD) => {
+            //  Treat as success: child already reaped
+            println!(
+                "[Orchestrator] Bridge already exited and reaped (ECHILD) - normal for fast exits"
+            );
+        }
+        Err(e) => {
+            return Err(anyhow!("[Orchestrator] Bridge wait failed: {}", e));
+        }
+        _ => {
+            println!("[Orchestrator] Unexpected bridge status");
         }
     }
-    Err(nix::errno::Errno::ECHILD) => {  //  Treat as success: child already reaped
-        println!("[Orchestrator] Bridge already exited and reaped (ECHILD) - normal for fast exits");
-    }
-    Err(e) => {
-        return Err(anyhow!("[Orchestrator] Bridge wait failed: {}", e));
-    }
-    _ => {
-        println!("[Orchestrator] Unexpected bridge status");
-    }
-}
 
-// Ensure the rest of the function proceeds only if no errors occurred earlier
+    // Ensure the rest of the function proceeds only if no errors occurred earlier
     println!(
         "[Orchestrator] Container '{}' created successfully (status: created)",
         config.container_id
@@ -420,7 +432,7 @@ fn init_handler_with_pause(config: &Config, _start_pipe_fd: i32) -> isize {
     println!("[Init] I am PID 1 in container: {}", getpid());
     println!("[Init] Container ID: {}", config.container_id);
 
-    match fs::prepare_rootfs(&config.container_id, &config) {
+    match fs::prepare_rootfs(&config.container_id, config) {
         Ok(_) => {
             println!("[Init] Filesystem prepared successfully");
         }
