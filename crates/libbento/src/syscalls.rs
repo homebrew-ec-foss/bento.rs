@@ -15,7 +15,7 @@ use crate::process::Config;
 // FORK AND PROCESS CREATION
 // ============================================================================
 
-/// Fork wrapper with parent and child logic separation
+// Fork wrapper with parent and child logic separation
 /*pub fn fork_intermediate<P, C>(parent_logic: P, child_logic: C) -> Result<Pid>
 where
     P: FnOnce(Pid) -> Result<()>,

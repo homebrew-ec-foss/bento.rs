@@ -441,7 +441,7 @@ fn init_handler_with_pause(config: &Config, _start_pipe_fd: i32) -> isize {
     println!("[Init] I am PID 1 in container: {}", getpid());
     println!("[Init] Container ID: {}", config.container_id);
 
-    match fs::prepare_rootfs(&config.container_id, &config) {
+    match fs::prepare_rootfs(&config.container_id, config) {
         Ok(_) => {
             println!("[Init] Filesystem prepared successfully");
         }

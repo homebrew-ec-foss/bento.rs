@@ -104,7 +104,7 @@ fn main() {
                             "manual" => RootfsPopulationMethod::Manual,
                             _ => RootfsPopulationMethod::BusyBox,
                         },
-                        ..Default::default()
+                        //..Default::default()
                     };
 
                     if let Err(e) = create_container(&process_config) {

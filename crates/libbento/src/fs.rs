@@ -45,7 +45,7 @@ pub fn prepare_rootfs(container_id: &str, config: &Config) -> Result<PathBuf> {
         return Err(anyhow::anyhow!("Invalid container_id: {container_id}"));
     }
 
-    let (rootfs, old_root) = get_rootfs(container_id, &config)?;
+    let (rootfs, old_root) = get_rootfs(container_id, config)?;
     println!("[Init] Rootfs: {rootfs:?}, Old root: {old_root:?}");
 
     // Phase 2: Bind mount rootfs to itself (required for pivot_root)
