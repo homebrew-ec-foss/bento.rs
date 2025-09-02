@@ -15,6 +15,13 @@ use std::fs as std_fs;
 use std::os::unix::io::{AsRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 
+// NEW: Add the RootfsPopulationMethod enum
+#[derive(Debug, Clone)]
+pub enum RootfsPopulationMethod {
+    Manual,
+    BusyBox,
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ContainerState {
     pub id: String,
@@ -112,14 +119,17 @@ pub struct Config {
     pub rootless: bool,
     pub bundle_path: String,
     pub container_id: String,
+    pub population_method: RootfsPopulationMethod,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             root_path: "/tmp/bento-rootfs".to_string(),
-            args: vec!["/bin/sh".to_string(), "-c".to_string(), 
-                       "echo '=== Bento.rs Demo: Isolation Showcase ===' && \
+            args: vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "echo '=== Bento.rs Demo: Isolation Showcase ===' && \
                         echo -n 'Kernel Info: ' && uname -a && \
                         echo -n 'Hostname: ' && hostname && \
                         echo -n 'User Info: ' && whoami && echo -n 'ID: ' && id && \
@@ -127,12 +137,15 @@ impl Default for Config {
                         echo -n 'UID Mapping: ' && cat /proc/self/uid_map && \
                         echo -n 'Process Tree: ' && ps aux && \
                         echo -n 'Mount Points: ' && cat /proc/mounts && \
-                        echo '=== End Demo: Functional Container Achieved! ==='".to_string()],
+                        echo '=== End Demo: Functional Container Achieved! ==='"
+                    .to_string(),
+            ],
 
             hostname: "bento-container".to_string(),
             rootless: true,
             bundle_path: ".".to_string(),
             container_id: "default".to_string(),
+            population_method: RootfsPopulationMethod::Manual,
         }
     }
 }
@@ -296,26 +309,34 @@ fn orchestrator_handler(bridge_pid: Pid, pipes: OrchestratorPipes, config: &Conf
     // NEW: Wait for bridge to exit (proper daemonless cleanup)
     println!("[Orchestrator] Waiting for bridge process to exit...");
 
-
     match waitpid(bridge_pid, None) {
         Ok(WaitStatus::Exited(pid, status)) => {
-        println!("[Orchestrator] Bridge {} exited with status {}", pid, status);
-        if status != 0 {
-            return Err(anyhow!("[Orchestrator] Bridge exited with non-zero status {}", status));
+            println!(
+                "[Orchestrator] Bridge {} exited with status {}",
+                pid, status
+            );
+            if status != 0 {
+                return Err(anyhow!(
+                    "[Orchestrator] Bridge exited with non-zero status {}",
+                    status
+                ));
+            }
+        }
+        Err(nix::errno::Errno::ECHILD) => {
+            //  Treat as success: child already reaped
+            println!(
+                "[Orchestrator] Bridge already exited and reaped (ECHILD) - normal for fast exits"
+            );
+        }
+        Err(e) => {
+            return Err(anyhow!("[Orchestrator] Bridge wait failed: {}", e));
+        }
+        _ => {
+            println!("[Orchestrator] Unexpected bridge status");
         }
     }
-    Err(nix::errno::Errno::ECHILD) => {  //  Treat as success: child already reaped
-        println!("[Orchestrator] Bridge already exited and reaped (ECHILD) - normal for fast exits");
-    }
-    Err(e) => {
-        return Err(anyhow!("[Orchestrator] Bridge wait failed: {}", e));
-    }
-    _ => {
-        println!("[Orchestrator] Unexpected bridge status");
-    }
-}
 
-// Ensure the rest of the function proceeds only if no errors occurred earlier
+    // Ensure the rest of the function proceeds only if no errors occurred earlier
     println!(
         "[Orchestrator] Container '{}' created successfully (status: created)",
         config.container_id

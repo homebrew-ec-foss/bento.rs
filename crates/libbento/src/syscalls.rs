@@ -42,8 +42,8 @@ where
 {
     match unsafe { fork() } {
         Ok(ForkResult::Parent { child }) => {
-            parent_logic(child)?;  // Run orchestrator logic, which includes its own waitpid
-            Ok(())  // Do NOT add another waitpid here—let parent_logic handle reaping
+            parent_logic(child)?; // Run orchestrator logic, which includes its own waitpid
+            Ok(()) // Do NOT add another waitpid here—let parent_logic handle reaping
         }
         Ok(ForkResult::Child) => {
             let exit_code = child_logic();
@@ -51,8 +51,11 @@ where
             let code_i32: i32 = match exit_code.try_into() {
                 Ok(code) => code,
                 Err(_) => {
-                    eprintln!("[Child] Exit code {} too large for i32; using -1", exit_code);
-                    -1  // Fallback to generic error
+                    eprintln!(
+                        "[Child] Exit code {} too large for i32; using -1",
+                        exit_code
+                    );
+                    -1 // Fallback to generic error
                 }
             };
             std::process::exit(code_i32);
@@ -60,7 +63,6 @@ where
         Err(e) => Err(anyhow!("Fork failed: {}", e)),
     }
 }
-
 
 /// Clones a new init process with the given flags, running the container command.
 /// Executes in the isolated namespace.

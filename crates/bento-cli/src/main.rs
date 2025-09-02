@@ -1,8 +1,10 @@
 // crates/bento-cli/src/main.rs
 
 use clap::{Parser, Subcommand, ValueHint};
-use libbento::process::{create_container, RootfsPopulationMethod, start_container, Config as ProcessConfig};
-use libbento::config::{Config as OciConfig};
+use libbento::config::Config as OciConfig;
+use libbento::process::{
+    Config as ProcessConfig, RootfsPopulationMethod, create_container, start_container,
+};
 use log::info;
 use std::path::PathBuf;
 
@@ -58,38 +60,65 @@ fn main() {
         Commands::Spec {} => {
             todo!("Generate OCI spec template");
         }
-    Commands::Create { container_id, bundle, population_method } => {
-        println!("Creating container '{}' with bundle '{}' using {} method", container_id, bundle.display(), population_method);
+        Commands::Create {
+            container_id,
+            bundle,
+            population_method,
+        } => {
+            println!(
+                "Creating container '{}' with bundle '{}' using {} method",
+                container_id,
+                bundle.display(),
+                population_method
+            );
 
-        let cfg_path = bundle.join("config.json");
-        match OciConfig::load(&cfg_path) {
-            Ok(cfg) => {
-                println!("Container '{}' validated. rootfs = {}", container_id, cfg.root.path.display());
-                println!("Creating container '{}' with bundle '{}'", container_id, bundle.display());
+            let cfg_path = bundle.join("config.json");
+            match OciConfig::load(&cfg_path) {
+                Ok(cfg) => {
+                    println!(
+                        "Container '{}' validated. rootfs = {}",
+                        container_id,
+                        cfg.root.path.display()
+                    );
+                    println!(
+                        "Creating container '{}' with bundle '{}'",
+                        container_id,
+                        bundle.display()
+                    );
 
-                let process_config = ProcessConfig {
-                    root_path: bundle.join(&cfg.root.path).to_string_lossy().into_owned(),
-                    args: cfg.process.as_ref().map(|p| p.args.clone()).unwrap_or_default(),
-                    hostname: cfg.hostname.clone().unwrap_or_else(|| "bento-container".to_string()),
-                    rootless: false, // adjust as needed
-                    bundle_path: bundle.to_string_lossy().into_owned(),
-                    container_id: container_id.clone(),
-                    ..Default::default()
-                };
+                    let process_config = ProcessConfig {
+                        root_path: bundle.join(&cfg.root.path).to_string_lossy().into_owned(),
+                        args: cfg
+                            .process
+                            .as_ref()
+                            .map(|p| p.args.clone())
+                            .unwrap_or_default(),
+                        hostname: cfg
+                            .hostname
+                            .clone()
+                            .unwrap_or_else(|| "bento-container".to_string()),
+                        rootless: false, // adjust as needed
+                        bundle_path: bundle.to_string_lossy().into_owned(),
+                        container_id: container_id.clone(),
+                        population_method: match population_method.as_str() {
+                            "manual" => RootfsPopulationMethod::Manual,
+                            _ => RootfsPopulationMethod::BusyBox,
+                        },
+                        ..Default::default()
+                    };
 
-                if let Err(e) = create_container(&process_config) {
-                    eprintln!("Container creation failed: {}", e);
+                    if let Err(e) = create_container(&process_config) {
+                        eprintln!("Container creation failed: {}", e);
+                        std::process::exit(1);
+                    }
+                    println!("Container '{}' created successfully", container_id);
+                }
+                Err(e) => {
+                    eprintln!("Invalid bundle: {}", e);
                     std::process::exit(1);
                 }
-                println!("Container '{}' created successfully", container_id);
-            }
-            Err(e) => {
-                eprintln!("Invalid bundle: {}", e);
-                std::process::exit(1);
             }
         }
-    }
-
 
         Commands::Start { container_id } => {
             println!("Starting container '{container_id}'");
